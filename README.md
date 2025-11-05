@@ -151,7 +151,7 @@ export SSH_PUBLIC_KEY="/path/to/ssh-key/id_rsa.pub"  # 默认值：/path/to/ssh-
 可通过环境变量配置SSH参数（在运行 `dist-launch run` 之前设置）：
 
 ```bash
-export SSH_KEY="/path/to/ssh-key/id_rsa"      # 默认：/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa
+export SSH_KEY="/path/to/ssh-key/id_rsa"
 export SSH_PORT="2025"                        # 默认：2025
 export SSH_USER="root"                        # 默认：root
 ```
@@ -176,44 +176,12 @@ dist-launch run train.sh --ssh-port 2025 --ssh-key /path/to/key --ssh-user root
 
 ```bash
 # 使用 rank 别名登录（仅在 rank0 节点上可用）
-ssh -i /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa \
+ssh -i /path/to/ssh-key/id_rsa \
     -p 2025 \
     root@rank-1
-
-# 或使用完整 hostname
-ssh -i /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa \
-    -p 2025 \
-    root@BYAW071-JPI2-A-4-420B-L-L01
 ```
 
 **注意：** rank 别名仅在 rank0 节点上可用，因为 `/etc/hosts` 只在 rank0 上更新。
-
-### 手动SSH登录
-
-**⚠️ 重要：手动登录时必须指定SSH密钥和端口，否则会要求输入密码！**
-
-```bash
-# ✅ 正确的登录方式（必须指定 -i 和 -p 参数）
-ssh -i /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa \
-    -p 2025 \
-    -o StrictHostKeyChecking=no \
-    root@BYAW071-JPI2-A-4-420B-L-L01
-
-# 或使用测试脚本（自动处理参数）
-bash dist_launch/scripts/test_ssh.sh BYAW071-JPI2-A-4-420B-L-L01
-```
-
-**常见错误：**
-- ❌ `ssh root@hostname` - 没有指定密钥，会使用默认密钥或要求密码
-- ❌ `ssh -i ~/.ssh/id_rsa root@hostname` - 使用了错误的密钥文件
-- ✅ `ssh -i /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa -p 2025 root@hostname` - 正确
-
-**检查密钥权限：**
-```bash
-chmod 600 /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa
-ls -l /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa
-# 应该显示: -rw------- (600权限)
-```
 
 ### 验证SSH密钥分发
 
@@ -223,50 +191,6 @@ ls -l /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa
 # 验证所有节点的SSH密钥配置
 bash dist_launch/scripts/verify_ssh_keys.sh
 ```
-
-### 手动修复SSH密钥
-
-如果验证失败或仍需要密码，可以手动在所有节点上添加公钥：
-
-**方法1：在目标节点上直接执行（推荐）**
-```bash
-# 先使用密码登录到目标节点一次
-ssh root@BYAW071-JPI2-A-4-420B-L-L01
-
-# 在目标节点上执行
-PUBLIC_KEY=$(cat /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub)
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-echo "$PUBLIC_KEY" >> ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-
-# 验证
-grep "$(echo "$PUBLIC_KEY" | awk '{print $2}')" ~/.ssh/authorized_keys
-```
-
-**故障排查步骤：**
-1. 确认使用了正确的密钥文件：
-   ```bash
-   # 在rank0上
-   ssh -v -i /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa \
-       -p 2025 \
-       root@BYAW071-JPI2-A-4-420B-L-L01 \
-       "echo 'Success'"
-   ```
-   查看 `-v` 输出的认证过程，确认使用的密钥文件。
-
-2. 检查目标节点上的公钥：
-   ```bash
-   # 在目标节点上执行
-   cat ~/.ssh/authorized_keys | grep "$(cat /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub | awk '{print $2}')"
-   ```
-
-3. 检查权限：
-   ```bash
-   # 在目标节点上
-   ls -ld ~/.ssh          # 应该是 drwx------ (700)
-   ls -l ~/.ssh/authorized_keys  # 应该是 -rw------- (600)
-   ```
 
 ## 进程管理
 
