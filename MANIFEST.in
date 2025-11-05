@@ -1,0 +1,6 @@
+include README.md
+include train.sh.example
+recursive-include auto_launch *.py *.sh
+recursive-include auto_launch/scripts *.sh *.py
+recursive-include auto_launch/lib *.py
+

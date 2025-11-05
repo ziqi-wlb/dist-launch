@@ -1,0 +1,28 @@
+#!/bin/bash
+# Example training script - copy this to train.sh and customize
+# This script will be executed on each node with the appropriate environment variables
+
+set -e
+
+# Environment variables are automatically set:
+# PET_NODE_RANK, RANK, WORLD_SIZE, MASTER_PORT, PET_MASTER_PORT, PET_MASTER_ADDR, MASTER_ADDR
+
+echo "Starting training on rank ${RANK}, node rank ${PET_NODE_RANK}"
+echo "Master address: ${MASTER_ADDR}:${MASTER_PORT}"
+echo "World size: ${WORLD_SIZE}"
+
+pwd
+
+# Example torchrun command
+# torchrun \
+#     --nnodes=${WORLD_SIZE} \
+#     --node_rank=${PET_NODE_RANK} \
+#     --nproc_per_node=1 \
+#     --master_addr=${MASTER_ADDR} \
+#     --master_port=${MASTER_PORT} \
+#     your_training_script.py
+
+# Add your actual training command here
+# Example:
+# python your_training_script.py
+
