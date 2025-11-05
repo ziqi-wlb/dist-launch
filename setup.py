@@ -15,7 +15,8 @@ setup(
     description='One-click launch tool for distributed training on cluster nodes',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    author='Auto Launch Team',
+    author='ziqi-wlb',
+    author_email="550461053@qq.com",
     python_requires='>=3.6',
     packages=['auto_launch', 'auto_launch.lib'],
     package_dir={

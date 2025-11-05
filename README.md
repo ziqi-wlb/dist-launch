@@ -12,9 +12,6 @@
 # 开发模式安装（可编辑）
 pip install -e .
 
-# 或生产模式安装
-pip install .
-
 # 或用户安装（无需root权限）
 pip install --user -e .
 ```
