@@ -13,9 +13,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_SCRIPT="${PROJECT_ROOT}/run.py"
-# Fallback: try auto_launch/run.py if run.py not in root
+# Fallback: try dist_launch/run.py if run.py not in root
 if [ ! -f "$PYTHON_SCRIPT" ]; then
-    PYTHON_SCRIPT="${PROJECT_ROOT}/auto_launch/run.py"
+    PYTHON_SCRIPT="${PROJECT_ROOT}/dist_launch/run.py"
 fi
 
 # Check if train script is provided

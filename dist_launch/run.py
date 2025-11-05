@@ -16,7 +16,7 @@ lib_path = os.path.join(os.path.dirname(__file__), 'lib')
 if not os.path.exists(lib_path):
     # Try installed package path
     import importlib.util
-    spec = importlib.util.find_spec('auto_launch')
+    spec = importlib.util.find_spec('dist_launch')
     if spec and spec.origin:
         lib_path = os.path.join(os.path.dirname(spec.origin), 'lib')
 sys.path.insert(0, lib_path)
@@ -204,7 +204,7 @@ def main():
         nodes = HostDiscovery.discover_all()
         if not nodes:
             print('Error: Cannot auto-discover nodes.')
-            print('Make sure cluster was initialized (auto-launch wait) or provide --nodes argument')
+            print('Make sure cluster was initialized (dist-launch wait) or provide --nodes argument')
             sys.exit(1)
         print(f'Discovered {len(nodes)} nodes: {", ".join(nodes)}')
     
@@ -270,7 +270,7 @@ def main():
             print(f'\nLaunching rank0 locally...')
             
             # Save process info for kill command
-            pid_info_file = '/tmp/auto-launch-pids.json'
+            pid_info_file = '/tmp/dist-launch-pids.json'
             pid_info = {
                 'train_script': train_script_abs,
                 'rank0_pid': None,
@@ -299,7 +299,7 @@ def main():
                     with open(pid_info_file, 'w') as f:
                         json.dump(pid_info, f, indent=2)
                     print(f'\nProcess info saved to {pid_info_file}')
-                    print(f'Use "auto-launch kill" to stop all training processes')
+                    print(f'Use "dist-launch kill" to stop all training processes')
                 except Exception as e:
                     print(f'Warning: Could not save process info: {e}', file=sys.stderr)
                 
@@ -347,7 +347,7 @@ def main():
                 try:
                     with open(pid_info_file, 'w') as f:
                         json.dump(pid_info, f, indent=2)
-                    print(f'Use "auto-launch kill" to stop all training processes')
+                    print(f'Use "dist-launch kill" to stop all training processes')
                 except Exception as e:
                     print(f'Warning: Could not save process info: {e}', file=sys.stderr)
                 

@@ -12,6 +12,9 @@ dist/
 .eggs/
 *.egg
 
+# Development mode entry script (keep in repo)
+# dist-launch
+
 # IDE
 .vscode/
 .idea/

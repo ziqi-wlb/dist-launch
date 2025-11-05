@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Command line interface for auto-launch
+Command line interface for dist-launch
 """
 import sys
 import os
@@ -9,7 +9,7 @@ import importlib.util
 def get_package_dir():
     """Get the directory where this package is installed"""
     # Try to find the package location
-    spec = importlib.util.find_spec('auto_launch')
+    spec = importlib.util.find_spec('dist_launch')
     if spec and spec.origin:
         return os.path.dirname(spec.origin)
     
@@ -31,7 +31,7 @@ def get_run_py():
     """Get the run.py path"""
     # Try to import run module and get its path
     try:
-        from auto_launch import run
+        from dist_launch import run
         if hasattr(run, '__file__'):
             return run.__file__
     except ImportError:
@@ -48,7 +48,7 @@ def get_run_py():
     run_py = os.path.join(package_dir, 'run.py')
     
     if not os.path.exists(run_py):
-        run_py = os.path.join(os.path.dirname(package_dir), 'auto_launch', 'run.py')
+        run_py = os.path.join(os.path.dirname(package_dir), 'dist_launch', 'run.py')
         if not os.path.exists(run_py):
             run_py = os.path.join(package_dir, '..', 'run.py')
             run_py = os.path.abspath(run_py)
@@ -69,7 +69,7 @@ def cmd_run(args):
     """Execute run.py with train script"""
     if not args:
         print('Error: train script is required')
-        print('Usage: auto-launch run <train.sh> [options]')
+        print('Usage: dist-launch run <train.sh> [options]')
         sys.exit(1)
     
     train_script = args[0]
@@ -100,11 +100,11 @@ def cmd_kill(args):
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
-        print('Usage: auto-launch <command> [arguments]')
+        print('Usage: dist-launch <command> [arguments]')
         print('Commands:')
         print('  wait                    Wait for debug mode')
         print('  run <train.sh> [opts]   Launch training on all nodes')
-        print('  kill [--force]          Kill all training processes started by auto-launch run')
+        print('  kill [--force]          Kill all training processes started by dist-launch run')
         sys.exit(1)
     
     command = sys.argv[1]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup script for auto-launch package
+Setup script for dist-launch package
 """
 from setuptools import setup, find_packages
 from pathlib import Path
@@ -10,7 +10,7 @@ readme_file = Path(__file__).parent / 'README.md'
 long_description = readme_file.read_text(encoding='utf-8') if readme_file.exists() else ''
 
 setup(
-    name='auto-launch',
+    name='dist-launch',
     version='0.1.0',
     description='One-click launch tool for distributed training on cluster nodes',
     long_description=long_description,
@@ -18,22 +18,22 @@ setup(
     author='ziqi-wlb',
     author_email="550461053@qq.com",
     python_requires='>=3.6',
-    packages=['auto_launch', 'auto_launch.lib'],
+    packages=['dist_launch', 'dist_launch.lib'],
     package_dir={
-        'auto_launch': 'auto_launch',
-        'auto_launch.lib': 'auto_launch/lib',
+        'dist_launch': 'dist_launch',
+        'dist_launch.lib': 'dist_launch/lib',
     },
     install_requires=[
         'torch>=1.8.0',
     ],
     entry_points={
         'console_scripts': [
-            'auto-launch=auto_launch.cli:main',
+            'dist-launch=dist_launch.cli:main',
         ],
     },
     include_package_data=True,
     package_data={
-        'auto_launch': [
+        'dist_launch': [
             'scripts/*.sh',
             'scripts/*.py',
         ],

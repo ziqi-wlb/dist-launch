@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Auto Launch - Unified command line interface for cluster management
-Usage:
-    auto-launch wait              # Wait for debug mode
-    auto-launch run <train.sh>    # Launch training on all nodes
+Dist Launch - Unified command line interface for cluster management
+Usage (development mode):
+    ./dist-launch wait              # Wait for debug mode
+    ./dist-launch run <train.sh>    # Launch training on all nodes
+Usage (installed):
+    dist-launch wait                # Wait for debug mode
+    dist-launch run <train.sh>      # Launch training on all nodes
 """
 import sys
 import os
@@ -12,10 +15,10 @@ import subprocess
 # Get the directory where this script is located
 # Support both development mode and package installation
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS_DIR = os.path.join(SCRIPT_DIR, 'auto_launch', 'scripts')
+SCRIPTS_DIR = os.path.join(SCRIPT_DIR, 'dist_launch', 'scripts')
 if not os.path.exists(SCRIPTS_DIR):
     SCRIPTS_DIR = os.path.join(SCRIPT_DIR, 'scripts')
-RUN_PY = os.path.join(SCRIPT_DIR, 'auto_launch', 'run.py')
+RUN_PY = os.path.join(SCRIPT_DIR, 'dist_launch', 'run.py')
 if not os.path.exists(RUN_PY):
     RUN_PY = os.path.join(SCRIPT_DIR, 'run.py')
 
@@ -36,7 +39,7 @@ def cmd_run(args):
     """Execute run.py with train script"""
     if not args:
         print('Error: train script is required')
-        print('Usage: auto-launch run <train.sh> [options]')
+        print('Usage: ./dist-launch run <train.sh> [options] (or dist-launch run <train.sh> if installed)')
         sys.exit(1)
     
     train_script = args[0]
@@ -50,7 +53,7 @@ def cmd_run(args):
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
-        print('Usage: auto-launch <command> [arguments]')
+        print('Usage: ./dist-launch <command> [arguments] (or dist-launch <command> if installed)')
         print('Commands:')
         print('  wait                    Wait for debug mode')
         print('  run <train.sh> [opts]   Launch training on all nodes')

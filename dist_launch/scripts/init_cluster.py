@@ -99,7 +99,7 @@ def update_hosts_file(hostnames):
     """
     try:
         hosts_file = '/etc/hosts'
-        hosts_backup = '/etc/hosts.auto-launch.backup'
+        hosts_backup = '/etc/hosts.dist-launch.backup'
         
         # Read current hosts file
         if os.path.exists(hosts_file):
@@ -116,9 +116,9 @@ def update_hosts_file(hostnames):
         except Exception as e:
             print(f'Warning: Could not create backup: {e}', file=sys.stderr)
         
-        # Remove old auto-launch entries
+        # Remove old dist-launch entries
         lines = current_hosts.split('\n')
-        filtered_lines = [line for line in lines if 'auto-launch' not in line.lower()]
+        filtered_lines = [line for line in lines if 'dist-launch' not in line.lower() and 'auto-launch' not in line.lower()]
         
         # Get IP addresses for each hostname
         rank_entries = []
@@ -127,7 +127,7 @@ def update_hosts_file(hostnames):
                 # Try to get IP address
                 ip = socket.gethostbyname(hostname)
                 rank_alias = f'rank-{rank}'
-                entry = f'{ip}\t{rank_alias}\t# auto-launch: rank{rank} -> {hostname}'
+                entry = f'{ip}\t{rank_alias}\t# dist-launch: rank{rank} -> {hostname}'
                 rank_entries.append(entry)
             except socket.gaierror:
                 # If hostname resolution fails, try to get IP from current node's hostname
@@ -136,7 +136,7 @@ def update_hosts_file(hostnames):
         # Write updated hosts file
         new_hosts = '\n'.join(filtered_lines)
         if rank_entries:
-            new_hosts += '\n\n# Auto-launch cluster node aliases (added automatically)\n'
+            new_hosts += '\n\n# Dist-launch cluster node aliases (added automatically)\n'
             new_hosts += '\n'.join(rank_entries)
             new_hosts += '\n'
         

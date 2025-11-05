@@ -87,5 +87,5 @@ echo "Option 2: Use password SSH once to add key"
 echo "After adding key manually on one node, you can use that node to distribute to others"
 echo ""
 echo "To test if key works, run:"
-echo "  bash auto_launch/scripts/test_ssh.sh <hostname>"
+echo "  bash dist_launch/scripts/test_ssh.sh <hostname>"
 

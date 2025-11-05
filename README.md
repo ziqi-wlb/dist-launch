@@ -1,4 +1,4 @@
-# Auto Launch - 一键启动集群训练工具（Debug模式）
+# Dist Launch - 一键启动集群训练工具（Debug模式）
 
 ## 功能说明
 
@@ -16,31 +16,35 @@ pip install -e .
 pip install --user -e .
 ```
 
-安装后可直接使用`auto-launch`命令：
+安装后可直接使用`dist-launch`命令：
 
 ```bash
-auto-launch wait              # 进入等待模式
-auto-launch run train.sh      # 启动训练
+dist-launch wait              # 进入等待模式
+dist-launch run train.sh      # 启动训练
 ```
 
 ### 方式2：直接使用（无需安装）
 
 ```bash
-# 使用统一命令
-./auto-launch wait
-./auto-launch run train.sh
+# 使用统一命令（开发模式）
+./dist-launch wait
+./dist-launch run train.sh
+
+# 或安装后使用
+dist-launch wait
+dist-launch run train.sh
 
 # 或直接使用run.sh
-bash auto_launch/scripts/run.sh train.sh
+bash dist_launch/scripts/run.sh train.sh
 ```
 
 ## 项目结构
 
 ```
-auto-launch/
-├── auto-launch            # 统一命令行入口（开发模式）
+dist-launch/
+├── dist-launch            # 统一命令行入口（开发模式）
 ├── setup.py               # Python包安装配置
-├── auto_launch/           # Python包目录
+├── dist_launch/           # Python包目录
 │   ├── __init__.py
 │   ├── cli.py             # 命令行入口（包安装后使用）
 │   ├── run.py             # 主执行脚本（被run.sh和cli.py调用）
@@ -67,19 +71,19 @@ auto-launch/
 ```bash
 # 在所有节点上执行（通常通过torchrun或启动脚本）
 # 如果已安装包：
-auto-launch wait
+dist-launch wait
 
 # 或开发模式：
-cd /path/to/auto-launch
-python3 auto_launch/scripts/init_cluster.py
-bash auto_launch/scripts/wait.sh
+cd /path/to/dist-launch
+python3 dist_launch/scripts/init_cluster.py
+bash dist_launch/scripts/wait.sh
 ```
 
 或者集成到启动脚本中：
 ```bash
 # 在train.sh或其他启动脚本中
-python3 /path/to/auto-launch/auto_launch/scripts/init_cluster.py && \
-bash /path/to/auto-launch/auto_launch/scripts/wait.sh
+python3 /path/to/dist-launch/dist_launch/scripts/init_cluster.py && \
+bash /path/to/dist-launch/dist_launch/scripts/wait.sh
 ```
 
 **功能：**
@@ -96,14 +100,14 @@ bash /path/to/auto-launch/auto_launch/scripts/wait.sh
 
 ```bash
 # 如果已安装包：
-auto-launch run train.sh
+dist-launch run train.sh
 
 # 或开发模式：
-cd /path/to/auto-launch
-./auto-launch run train.sh
+cd /path/to/dist-launch
+./dist-launch run train.sh
 
 # 或直接使用run.sh：
-bash /path/to/auto-launch/auto_launch/scripts/run.sh train.sh
+bash /path/to/dist-launch/dist_launch/scripts/run.sh train.sh
 ```
 
 **功能：**
@@ -113,9 +117,9 @@ bash /path/to/auto-launch/auto_launch/scripts/run.sh train.sh
 - 阻塞等待所有节点完成
 
 **命令行使用：**
-- `auto-launch wait` - 进入等待模式（集群初始化后等待调试）
-- `auto-launch run <train.sh>` - 一键启动训练（train.sh作为第一个参数）
-- `auto-launch kill [--force]` - 一键停止所有训练进程（不会停止wait进程）
+- `dist-launch wait` - 进入等待模式（集群初始化后等待调试）
+- `dist-launch run <train.sh>` - 一键启动训练（train.sh作为第一个参数）
+- `dist-launch kill [--force]` - 一键停止所有训练进程（不会停止wait进程）
 
 ## 环境变量
 
@@ -144,7 +148,7 @@ export SSH_PUBLIC_KEY="/path/to/ssh-key/id_rsa.pub"  # 默认值：/path/to/ssh-
 
 ## SSH配置
 
-可通过环境变量配置SSH参数（在运行 `auto-launch run` 之前设置）：
+可通过环境变量配置SSH参数（在运行 `dist-launch run` 之前设置）：
 
 ```bash
 export SSH_KEY="/path/to/ssh-key/id_rsa"      # 默认：/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa
@@ -154,7 +158,7 @@ export SSH_USER="root"                        # 默认：root
 
 或者通过命令行参数指定：
 ```bash
-auto-launch run train.sh --ssh-port 2025 --ssh-key /path/to/key --ssh-user root
+dist-launch run train.sh --ssh-port 2025 --ssh-key /path/to/key --ssh-user root
 ```
 
 **默认配置：**
@@ -196,7 +200,7 @@ ssh -i /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa \
     root@BYAW071-JPI2-A-4-420B-L-L01
 
 # 或使用测试脚本（自动处理参数）
-bash auto_launch/scripts/test_ssh.sh BYAW071-JPI2-A-4-420B-L-L01
+bash dist_launch/scripts/test_ssh.sh BYAW071-JPI2-A-4-420B-L-L01
 ```
 
 **常见错误：**
@@ -217,7 +221,7 @@ ls -l /mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa
 
 ```bash
 # 验证所有节点的SSH密钥配置
-bash auto_launch/scripts/verify_ssh_keys.sh
+bash dist_launch/scripts/verify_ssh_keys.sh
 ```
 
 ### 手动修复SSH密钥

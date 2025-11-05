@@ -12,7 +12,7 @@ SSH_USER="${SSH_USER:-root}"
 
 if [ ! -f "$CLUSTER_INFO_FILE" ]; then
     echo "Error: Cluster info file not found: $CLUSTER_INFO_FILE"
-    echo "Please run cluster initialization first (auto-launch wait)"
+    echo "Please run cluster initialization first (dist-launch wait)"
     exit 1
 fi
 

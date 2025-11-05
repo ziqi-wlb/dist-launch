@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kill all training processes started by auto-launch run
-This script kills all processes recorded during the last auto-launch run execution
+Kill all training processes started by dist-launch run
+This script kills all processes recorded during the last dist-launch run execution
 """
 import os
 import sys
@@ -15,7 +15,7 @@ lib_path = os.path.join(os.path.dirname(__file__), 'lib')
 if not os.path.exists(lib_path):
     # Try installed package path
     import importlib.util
-    spec = importlib.util.find_spec('auto_launch')
+    spec = importlib.util.find_spec('dist_launch')
     if spec and spec.origin:
         lib_path = os.path.join(os.path.dirname(spec.origin), 'lib')
 sys.path.insert(0, lib_path)
@@ -24,14 +24,14 @@ from node_executor import NodeExecutor
 from cluster_manager import NodeConfig
 
 
-PID_FILE = '/tmp/auto-launch-pids.json'
+PID_FILE = '/tmp/dist-launch-pids.json'
 
 
 def load_process_info() -> Optional[Dict]:
     """Load process information from PID file"""
     if not os.path.exists(PID_FILE):
         print(f'Error: Process info file not found: {PID_FILE}')
-        print('No training processes were started by auto-launch run')
+        print('No training processes were started by dist-launch run')
         return None
     
     try:
@@ -52,8 +52,8 @@ def kill_local_process(pid: int, name: str = '', force: bool = False, kill_tree:
             if os.path.exists(cmdline_file):
                 with open(cmdline_file, 'r') as f:
                     cmdline = f.read()
-                    # Check if it's wait.sh or auto-launch wait
-                    if 'wait.sh' in cmdline or 'auto-launch wait' in cmdline:
+                    # Check if it's wait.sh or dist-launch wait
+                    if 'wait.sh' in cmdline or 'dist-launch wait' in cmdline:
                         print(f'  Skipping {name} (PID {pid}): This is a wait process, not a training process')
                         return False
         except Exception:
@@ -134,7 +134,7 @@ def kill_remote_process(executor: NodeExecutor, node: NodeConfig, pid: int, name
                     pass
         
         # Check if process exists and is not a wait process
-        check_cmd = f'if [ -f /proc/{actual_pid}/cmdline ]; then cat /proc/{actual_pid}/cmdline | grep -q "wait.sh\\|auto-launch wait" && echo "wait" || echo "train"; else echo "notfound"; fi'
+        check_cmd = f'if [ -f /proc/{actual_pid}/cmdline ]; then cat /proc/{actual_pid}/cmdline | grep -q "wait.sh\\|dist-launch wait" && echo "wait" || echo "train"; else echo "notfound"; fi'
         
         result = executor.execute_sync(node, check_cmd)
         # result[1] is stdout (already a string because text=True in execute_sync)
@@ -182,7 +182,7 @@ def kill_all_processes(force: bool = False, executor: Optional[NodeExecutor] = N
     if not process_info:
         return False
     
-    print('Killing all training processes started by auto-launch run...')
+    print('Killing all training processes started by dist-launch run...')
     print(f'Process info file: {PID_FILE}\n')
     
     killed_count = 0
@@ -264,7 +264,7 @@ def kill_all_processes(force: bool = False, executor: Optional[NodeExecutor] = N
 
 def main():
     """Main entry point"""
-    parser = argparse.ArgumentParser(description='Kill all training processes started by auto-launch run')
+    parser = argparse.ArgumentParser(description='Kill all training processes started by dist-launch run')
     parser.add_argument('--force', '-f', action='store_true',
                        help='Force kill (SIGKILL) instead of graceful (SIGTERM)')
     parser.add_argument('--ssh-key', type=str,
