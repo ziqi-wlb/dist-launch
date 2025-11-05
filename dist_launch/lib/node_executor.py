@@ -56,8 +56,9 @@ class NodeExecutor:
         if work_dir:
             parts.append(f'cd {work_dir}')
         if env_vars:
-            env_str = ' '.join([f'{k}="{v}"' for k, v in env_vars.items()])
-            parts.append(env_str)
+            # Export environment variables so they are available in the script
+            export_cmds = ' && '.join([f'export {k}="{v}"' for k, v in env_vars.items()])
+            parts.append(export_cmds)
         parts.append(command)
         
         full_command = ' && '.join(parts) if len(parts) > 1 else parts[0]
