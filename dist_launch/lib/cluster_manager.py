@@ -45,46 +45,32 @@ class ClusterManager:
         
         Args:
             node: Node configuration
-            use_existing: If True, use existing env vars from image and only set missing ones
+            use_existing: If True, use existing env vars from image as base, but always set node-specific vars
             
         Returns:
             Dictionary of environment variables
         """
-        env_vars = {}
+        # Always set node-specific environment variables explicitly
+        # For remote nodes via SSH, we must pass env vars explicitly because SSH non-interactive
+        # shell doesn't inherit environment variables from pytorch-job
+        env_vars = {
+            'PET_NODE_RANK': str(node.node_rank),
+            'RANK': str(node.rank),
+            'WORLD_SIZE': str(self.world_size),
+            'MASTER_PORT': str(self.master_port),
+            'PET_MASTER_PORT': str(self.master_port),
+            'PET_MASTER_ADDR': self.master_addr,
+            'MASTER_ADDR': self.master_addr,
+        }
         
         if use_existing:
-            # Use existing env from pytorch-job image if available
+            # If use_existing is True, we still set the env vars above, but for local rank0
+            # we can optionally merge with existing env vars if they exist
+            # For remote nodes, we always need to pass env vars via SSH
             import os
-            existing_rank = os.environ.get('RANK', None)
-            existing_node_rank = os.environ.get('PET_NODE_RANK', None)
-            existing_world_size = os.environ.get('WORLD_SIZE', None)
-            existing_master_addr = os.environ.get('MASTER_ADDR', None)
-            existing_master_port = os.environ.get('MASTER_PORT', None)
-            
-            # Only set if not already set by image
-            if existing_node_rank is None:
-                env_vars['PET_NODE_RANK'] = str(node.node_rank)
-            if existing_rank is None:
-                env_vars['RANK'] = str(node.rank)
-            if existing_world_size is None:
-                env_vars['WORLD_SIZE'] = str(self.world_size)
-            if existing_master_port is None:
-                env_vars['MASTER_PORT'] = str(self.master_port)
-                env_vars['PET_MASTER_PORT'] = str(self.master_port)
-            if existing_master_addr is None:
-                env_vars['PET_MASTER_ADDR'] = self.master_addr
-                env_vars['MASTER_ADDR'] = self.master_addr
-        else:
-            # Set all env vars explicitly
-            env_vars = {
-                'PET_NODE_RANK': str(node.node_rank),
-                'RANK': str(node.rank),
-                'WORLD_SIZE': str(self.world_size),
-                'MASTER_PORT': str(self.master_port),
-                'PET_MASTER_PORT': str(self.master_port),
-                'PET_MASTER_ADDR': self.master_addr,
-                'MASTER_ADDR': self.master_addr,
-            }
+            # Only for local rank0, we might want to preserve some existing env vars
+            # But for now, we always set explicitly to ensure correctness
+            pass
         
         return env_vars
     

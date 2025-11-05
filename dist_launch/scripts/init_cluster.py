@@ -162,6 +162,114 @@ def update_hosts_file(hostnames):
         return False
 
 
+def update_ssh_config(hostnames, ssh_key_path, ssh_port=2025, ssh_user='root'):
+    """
+    Update ~/.ssh/config file on rank0 to add SSH configuration for rank-0, rank-1, etc.
+    This allows passwordless login via ssh rank-0 without specifying -i key
+    
+    Args:
+        hostnames: List of hostnames, ordered by rank
+        ssh_key_path: Path to SSH private key
+        ssh_port: SSH port (default 2025)
+        ssh_user: SSH username (default root)
+    
+    Returns:
+        True if successful
+    """
+    try:
+        ssh_dir = os.path.expanduser('~/.ssh')
+        ssh_config_file = os.path.join(ssh_dir, 'config')
+        ssh_config_backup = os.path.join(ssh_dir, 'config.dist-launch.backup')
+        
+        # Create .ssh directory if not exists
+        os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+        
+        # Read current SSH config
+        current_config = ''
+        if os.path.exists(ssh_config_file):
+            with open(ssh_config_file, 'r') as f:
+                current_config = f.read()
+        
+        # Create backup
+        try:
+            with open(ssh_config_backup, 'w') as f:
+                f.write(current_config)
+            print(f'Created SSH config backup: {ssh_config_backup}')
+        except Exception as e:
+            print(f'Warning: Could not create SSH config backup: {e}', file=sys.stderr)
+        
+        # Remove old dist-launch entries
+        # SSH config format: Host name\n    option value\n    option value\n
+        lines = current_config.split('\n')
+        filtered_lines = []
+        skip_block = False
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Check if this is a dist-launch Host block or comment
+            if stripped.startswith('Host ') and 'rank-' in stripped.lower():
+                skip_block = True
+                continue
+            if 'dist-launch' in stripped.lower() and 'cluster node ssh' in stripped.lower():
+                skip_block = True
+                continue
+            
+            # If we're in a skip block, check if we should stop skipping
+            if skip_block:
+                # Stop skipping when we hit the next Host entry (non-dist-launch)
+                if stripped.startswith('Host ') and 'rank-' not in stripped.lower():
+                    skip_block = False
+                    filtered_lines.append(line)
+                # Stop skipping when we hit a non-indented, non-empty, non-comment line that's not a Host
+                elif stripped and not line.startswith(' ') and not line.startswith('\t') and not stripped.startswith('#'):
+                    skip_block = False
+                    filtered_lines.append(line)
+                # Otherwise continue skipping (this line is part of the dist-launch block)
+            else:
+                filtered_lines.append(line)
+        
+        # Build new SSH config entries
+        config_entries = []
+        config_entries.append('\n# Dist-launch cluster node SSH configuration (added automatically)')
+        config_entries.append('# This allows passwordless login via: ssh rank-0, ssh rank-1, etc.')
+        
+        for rank, hostname in enumerate(hostnames):
+            rank_alias = f'rank-{rank}'
+            config_entries.append(f'\nHost {rank_alias}')
+            config_entries.append(f'    HostName {hostname}')
+            config_entries.append(f'    User {ssh_user}')
+            config_entries.append(f'    Port {ssh_port}')
+            config_entries.append(f'    IdentityFile {ssh_key_path}')
+            config_entries.append('    StrictHostKeyChecking no')
+            config_entries.append('    UserKnownHostsFile /dev/null')
+            config_entries.append('    LogLevel ERROR')
+        
+        # Write updated SSH config
+        new_config = '\n'.join(filtered_lines)
+        if config_entries:
+            new_config += '\n' + '\n'.join(config_entries) + '\n'
+        
+        try:
+            with open(ssh_config_file, 'w') as f:
+                f.write(new_config)
+            os.chmod(ssh_config_file, 0o600)
+            print(f'Updated ~/.ssh/config with rank aliases')
+            return True
+        except PermissionError:
+            print(f'Warning: Permission denied writing to {ssh_config_file}', file=sys.stderr)
+            return False
+        except Exception as e:
+            print(f'Error updating SSH config file: {e}', file=sys.stderr)
+            return False
+            
+    except Exception as e:
+        print(f'Error updating SSH config file: {e}', file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def distribute_ssh_key(hostnames, public_key_path):
     """
     Distribute SSH public key to all nodes using allgather
@@ -372,6 +480,12 @@ def discover_and_save_hostnames():
             print(f'Discovered {len(hostnames)} nodes: {", ".join(hostnames)}')
             
             update_hosts_file(hostnames)
+            
+            # Update SSH config for easy login without specifying key
+            ssh_key_path = os.environ.get('SSH_KEY', '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa')
+            ssh_port = int(os.environ.get('SSH_PORT', '2025'))
+            ssh_user = os.environ.get('SSH_USER', 'root')
+            update_ssh_config(hostnames, ssh_key_path, ssh_port, ssh_user)
             
             dist.barrier()
             return hostnames

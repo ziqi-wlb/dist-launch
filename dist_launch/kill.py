@@ -9,6 +9,7 @@ import json
 import subprocess
 import argparse
 from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add lib directory to path
 lib_path = os.path.join(os.path.dirname(__file__), 'lib')
@@ -227,9 +228,12 @@ def kill_all_processes(force: bool = False, executor: Optional[NodeExecutor] = N
         if kill_local_process(rank0_pid, 'rank0', force=force, kill_tree=True):
             killed_count += 1
     
-    # Kill remote processes
+    # Kill remote processes in parallel
     if 'remote_processes' in process_info and executor:
         remote_procs = process_info['remote_processes']
+        
+        # Prepare tasks for parallel execution
+        kill_tasks = []
         for proc_info in remote_procs:
             total_count += 1
             hostname = proc_info.get('hostname', '')
@@ -248,8 +252,26 @@ def kill_all_processes(force: bool = False, executor: Optional[NodeExecutor] = N
                 hostname=hostname
             )
             
-            if kill_remote_process(executor, node, pid, f'rank{rank}', force=force, kill_tree=True, process_info=process_info):
-                killed_count += 1
+            kill_tasks.append((executor, node, pid, f'rank{rank}', force, process_info))
+        
+        # Execute kill operations in parallel
+        if kill_tasks:
+            with ThreadPoolExecutor(max_workers=len(kill_tasks)) as executor_pool:
+                futures = {
+                    executor_pool.submit(
+                        kill_remote_process, 
+                        task[0], task[1], task[2], task[3], 
+                        force=task[4], kill_tree=True, process_info=task[5]
+                    ): task for task in kill_tasks
+                }
+                
+                for future in as_completed(futures):
+                    try:
+                        if future.result():
+                            killed_count += 1
+                    except Exception as e:
+                        task = futures[future]
+                        print(f'  ✗ Error killing {task[3]} on {task[1].hostname}: {e}')
     
     print(f'\nSummary: {killed_count}/{total_count} processes killed')
     

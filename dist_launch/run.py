@@ -96,7 +96,7 @@ def create_cluster(nodes: List[str], master_addr: str, world_size: int) -> Clust
 
 
 def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_script: str,
-                   dry_run: bool = False, wait: bool = False, use_existing_env: bool = False) -> tuple:
+                   dry_run: bool = False, wait: bool = False, use_existing_env: bool = True) -> tuple:
     """
     Launch training on all nodes
     
@@ -148,6 +148,9 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
             continue
         
         # Remote nodes - prepare for async launch
+        # Always pass env vars to remote nodes via SSH, because SSH non-interactive shell
+        # doesn't automatically inherit environment variables from pytorch-job
+        # We need to explicitly pass the correct env vars for each node
         exec_env = env_vars if env_vars else None
         train_script_dir = os.path.dirname(train_script_abs) if os.path.dirname(train_script_abs) else os.getcwd()
         train_script_name = os.path.basename(train_script_abs)
@@ -238,7 +241,11 @@ def main():
             print('Error: Some nodes are not reachable')
             sys.exit(1)
     
-    use_existing_env = bool(os.environ.get('MASTER_ADDR') and os.environ.get('WORLD_SIZE'))
+    # Default to True: use existing env vars from pytorch-job
+    # Only set to False if explicitly requested (e.g., for testing without pytorch-job)
+    use_existing_env = True
+    if os.environ.get('DIST_LAUNCH_OVERRIDE_ENV', '').lower() in ('1', 'true', 'yes'):
+        use_existing_env = False
     
     # Launch training - returns (processes, node_commands)
     processes, node_commands = launch_training(cluster, executor, args.train_script,
@@ -260,9 +267,14 @@ def main():
             train_script_abs = rank0_cmd_info['train_script_abs']
             
             # Prepare environment for rank0
+            # If use_existing_env is True, use existing env vars from pytorch-job
+            # Only add missing env vars, don't override existing ones
             if use_existing_env:
                 full_env = os.environ.copy()
-                full_env.update(env_vars)
+                # Only add env vars that are not already set
+                for key, value in env_vars.items():
+                    if key not in full_env:
+                        full_env[key] = value
             else:
                 full_env = os.environ.copy()
                 full_env.update(env_vars)
