@@ -14,6 +14,141 @@ import subprocess
 import re
 import socket
 from pathlib import Path
+from datetime import datetime
+
+
+# Log file path - can be configured via DIST_LAUNCH_LOG_FILE environment variable
+# Default: /tmp/dist-launch-init.log
+# If using shared storage, you can set it to a shared path like:
+#   export DIST_LAUNCH_LOG_FILE="/shared/path/dist-launch-init-${HOSTNAME}.log"
+# Or use a single file (each node will append):
+#   export DIST_LAUNCH_LOG_FILE="/shared/path/dist-launch-init.log"
+def get_log_file_path():
+    """Get log file path from environment or use default"""
+    log_file = os.environ.get('DIST_LAUNCH_LOG_FILE', '/tmp/dist-launch-init.log')
+    
+    # If the path contains ${HOSTNAME} or ${RANK}, replace them
+    hostname = os.environ.get('HOSTNAME', '')
+    if not hostname:
+        import socket
+        hostname = socket.gethostname()
+    
+    rank = os.environ.get('RANK', '0')
+    
+    log_file = log_file.replace('${HOSTNAME}', hostname)
+    log_file = log_file.replace('${RANK}', str(rank))
+    log_file = log_file.replace('$HOSTNAME', hostname)
+    log_file = log_file.replace('$RANK', str(rank))
+    
+    return log_file
+
+LOG_FILE = None  # Will be set in setup_logging
+
+
+class LogWriter:
+    """Write logs to both file and stdout/stderr"""
+    _log_file_handle = None
+    _lock = None
+    
+    def __init__(self, log_file, original_stream, is_stderr=False):
+        self.log_file = log_file
+        self.original_stream = original_stream
+        self.is_stderr = is_stderr
+        
+        # Initialize file handle if not exists
+        if LogWriter._log_file_handle is None:
+            try:
+                LogWriter._log_file_handle = open(log_file, 'a', encoding='utf-8', buffering=1)  # Line buffered
+            except Exception as e:
+                # If can't open file, log to stderr
+                original_stream.write(f'Warning: Could not open log file {log_file}: {e}\n')
+        
+    def write(self, message):
+        """Write to both file and original stream"""
+        if not message:  # Skip empty messages
+            return
+            
+        # Always write to original stream
+        self.original_stream.write(message)
+        
+        # Write to log file if available
+        if LogWriter._log_file_handle is not None:
+            try:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                prefix = '[ERROR]' if self.is_stderr else '[INFO]'
+                LogWriter._log_file_handle.write(f'[{timestamp}] {prefix} {message}')
+                LogWriter._log_file_handle.flush()  # Force flush to ensure immediate write
+            except Exception as e:
+                # If write fails, try to write error to original stream
+                try:
+                    self.original_stream.write(f'Warning: Log write failed: {e}\n')
+                except Exception:
+                    pass
+    
+    def flush(self):
+        """Flush both file and original stream"""
+        self.original_stream.flush()
+        if LogWriter._log_file_handle is not None:
+            try:
+                LogWriter._log_file_handle.flush()
+            except Exception:
+                pass
+    
+    @classmethod
+    def close_log_file(cls):
+        """Close log file handle"""
+        if cls._log_file_handle is not None:
+            try:
+                cls._log_file_handle.close()
+            except Exception:
+                pass
+            cls._log_file_handle = None
+
+
+def setup_logging():
+    """Setup logging to file and stdout/stderr"""
+    global LOG_FILE
+    LOG_FILE = get_log_file_path()
+    
+    try:
+        # Create directory if it doesn't exist
+        log_dir = os.path.dirname(LOG_FILE)
+        if log_dir and not os.path.exists(log_dir):
+            try:
+                os.makedirs(log_dir, mode=0o755, exist_ok=True)
+            except Exception as e:
+                sys.stderr.write(f'Warning: Could not create log directory {log_dir}: {e}\n')
+                # Fallback to /tmp
+                LOG_FILE = '/tmp/dist-launch-init.log'
+        
+        # Get hostname and rank for log header
+        hostname = os.environ.get('HOSTNAME', '')
+        if not hostname:
+            import socket
+            hostname = socket.gethostname()
+        rank = os.environ.get('RANK', 'N/A')
+        
+        # Clear existing log file (or append if it's a shared file)
+        mode = 'a' if os.path.exists(LOG_FILE) else 'w'
+        with open(LOG_FILE, mode, encoding='utf-8') as f:
+            if mode == 'w':
+                f.write(f'=== Dist-Launch Init Log ===\n')
+            f.write(f'=== Started at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ===\n')
+            f.write(f'=== Hostname: {hostname}, Rank: {rank} ===\n')
+        
+        # Replace stdout and stderr with LogWriter
+        sys.stdout = LogWriter(LOG_FILE, sys.stdout, is_stderr=False)
+        sys.stderr = LogWriter(LOG_FILE, sys.stderr, is_stderr=True)
+        print(f'Logging initialized, log file: {LOG_FILE}')
+        print(f'Log file directory: {os.path.dirname(LOG_FILE)}')
+    except Exception as e:
+        # If logging setup fails, continue without file logging
+        original_stderr = sys.stderr
+        try:
+            original_stderr.write(f'Warning: Could not setup file logging: {e}\n')
+            original_stderr.write(f'Attempted log file path: {LOG_FILE}\n')
+        except Exception:
+            pass
 
 
 def detect_network_interfaces():
@@ -305,13 +440,25 @@ def distribute_ssh_key(hostnames, public_key_path):
         authorized_keys_file = os.path.join(ssh_dir, 'authorized_keys')
         
         # Create .ssh directory if not exists
-        os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+        try:
+            os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+            print(f'Created/verified .ssh directory: {ssh_dir}')
+        except Exception as e:
+            print(f'Error creating .ssh directory {ssh_dir}: {e}', file=sys.stderr)
+            return False
         
         # Read existing authorized_keys
         existing_keys = set()
         if os.path.exists(authorized_keys_file):
-            with open(authorized_keys_file, 'r') as f:
-                existing_keys = set(line.strip() for line in f if line.strip())
+            try:
+                with open(authorized_keys_file, 'r') as f:
+                    existing_keys = set(line.strip() for line in f if line.strip())
+                print(f'Read existing authorized_keys file with {len(existing_keys)} keys')
+            except Exception as e:
+                print(f'Warning: Could not read existing authorized_keys: {e}', file=sys.stderr)
+                # Continue anyway, will create new file
+        else:
+            print(f'authorized_keys file does not exist, will create new one: {authorized_keys_file}')
         
         # Add new key if not already present
         # Check if key exists (by comparing key content, not exact match)
@@ -335,21 +482,47 @@ def distribute_ssh_key(hostnames, public_key_path):
                     break
         
         if not key_exists:
-            with open(authorized_keys_file, 'a') as f:
-                try:
-                    if os.path.getsize(authorized_keys_file) > 0:
-                        with open(authorized_keys_file, 'rb') as rf:
-                            rf.seek(-1, os.SEEK_END)
-                            if rf.read(1) != b'\n':
-                                f.write('\n')
-                except Exception:
-                    pass
-                f.write(f'{public_key.strip()}\n')
-            os.chmod(authorized_keys_file, 0o600)
+            try:
+                # Use 'a' mode to append, but if file doesn't exist, 'a' will create it
+                mode = 'a' if os.path.exists(authorized_keys_file) else 'w'
+                with open(authorized_keys_file, mode) as f:
+                    # If appending to existing file, ensure newline before adding
+                    if mode == 'a' and os.path.getsize(authorized_keys_file) > 0:
+                        try:
+                            with open(authorized_keys_file, 'rb') as rf:
+                                rf.seek(-1, os.SEEK_END)
+                                if rf.read(1) != b'\n':
+                                    f.write('\n')
+                        except Exception:
+                            pass
+                    f.write(f'{public_key.strip()}\n')
+                print(f'Added SSH public key to {authorized_keys_file}')
+            except Exception as e:
+                print(f'Error writing to authorized_keys file {authorized_keys_file}: {e}', file=sys.stderr)
+                import traceback
+                traceback.print_exc()
+                return False
         
-        os.chmod(ssh_dir, 0o700)
+        # Ensure correct permissions
+        try:
+            os.chmod(ssh_dir, 0o700)
+            if os.path.exists(authorized_keys_file):
+                os.chmod(authorized_keys_file, 0o600)
+                print(f'Set permissions on {authorized_keys_file}: 0o600')
+            else:
+                print(f'Warning: authorized_keys file was not created: {authorized_keys_file}', file=sys.stderr)
+                return False
+        except Exception as e:
+            print(f'Error setting permissions: {e}', file=sys.stderr)
+            return False
+        
+        # Verify the file exists and has content
         if os.path.exists(authorized_keys_file):
-            os.chmod(authorized_keys_file, 0o600)
+            file_size = os.path.getsize(authorized_keys_file)
+            print(f'Verified authorized_keys file exists: {authorized_keys_file} (size: {file_size} bytes)')
+        else:
+            print(f'Error: authorized_keys file does not exist after creation: {authorized_keys_file}', file=sys.stderr)
+            return False
         
         return True
         
@@ -363,6 +536,9 @@ def discover_and_save_hostnames():
     Discover all hostnames using PyTorch allgather and save to file
     This should be called on all nodes simultaneously
     """
+    print(f'Starting cluster discovery...')
+    print(f'Environment: RANK={os.environ.get("RANK", "N/A")}, WORLD_SIZE={os.environ.get("WORLD_SIZE", "N/A")}')
+    
     # Save original NCCL environment variables
     nccl_vars = ['NCCL_SOCKET_IFNAME', 'NCCL_IB_DISABLE', 'NCCL_DEBUG']
     original_nccl_env = {}
@@ -371,6 +547,7 @@ def discover_and_save_hostnames():
             original_nccl_env[var] = os.environ[var]
     
     try:
+        print(f'Initializing PyTorch distributed...')
         # Set NCCL environment variables for GB200
         # These should be set before initializing process group
         if 'NCCL_SOCKET_IFNAME' not in os.environ:
@@ -394,8 +571,11 @@ def discover_and_save_hostnames():
         world_size = int(os.environ.get('WORLD_SIZE', 1))
         rank = int(os.environ.get('RANK', 0))
         
+        print(f'Configuration: master_addr={master_addr}, init_port={init_master_port}, world_size={world_size}, rank={rank}')
+        
         # Initialize process group
         backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+        print(f'Using backend: {backend} (CUDA available: {torch.cuda.is_available()})')
         
         # Increase timeout for GB200 network initialization
         init_timeout = torch.distributed.default_pg_timeout
@@ -403,6 +583,7 @@ def discover_and_save_hostnames():
             from datetime import timedelta
             init_timeout = timedelta(seconds=1800)
         
+        print(f'Calling dist.init_process_group: backend={backend}, master={master_addr}:{init_master_port}, world_size={world_size}, rank={rank}, timeout={init_timeout.total_seconds()}s')
         dist.init_process_group(
             backend=backend,
             init_method=f'tcp://{master_addr}:{init_master_port}',
@@ -410,15 +591,18 @@ def discover_and_save_hostnames():
             rank=rank,
             timeout=init_timeout
         )
+        print(f'✓ Process group initialized successfully')
         
         world_size = dist.get_world_size()
         rank = dist.get_rank()
+        print(f'Confirmed: world_size={world_size}, rank={rank}')
         
         # Get current hostname
         current_hostname = os.environ.get('HOSTNAME', '')
         if not current_hostname:
             import socket
             current_hostname = socket.gethostname()
+        print(f'Current hostname: {current_hostname}')
         
         # Convert hostname to tensor for allgather
         hostname_bytes = current_hostname.encode('utf-8')
@@ -433,7 +617,9 @@ def discover_and_save_hostnames():
             local_tensor = torch.ByteTensor(list(hostname_bytes))
             gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
         
+        print(f'Gathering hostnames from all nodes...')
         dist.all_gather(gathered_tensors, local_tensor)
+        print(f'✓ Hostname gathering completed')
         
         # Extract hostnames from gathered tensors
         hostnames = []
@@ -442,6 +628,8 @@ def discover_and_save_hostnames():
             hostname = hostname_bytes.decode('utf-8', errors='ignore')
             if hostname:
                 hostnames.append(hostname)
+        
+        print(f'Discovered {len(hostnames)} hostnames: {", ".join(hostnames)}')
         
         # Distribute SSH public key to all nodes
         ssh_public_key = os.environ.get('SSH_PUBLIC_KEY', 
@@ -453,13 +641,16 @@ def discover_and_save_hostnames():
                 key_preview = f.read().strip()[:50]
                 print(f'Public key preview: {key_preview}...')
         
+        print(f'Calling distribute_ssh_key...')
         success = distribute_ssh_key(hostnames, ssh_public_key)
         if success:
             print(f'✓ SSH public key distribution completed on rank {rank}')
         else:
             print(f'✗ Warning: SSH public key distribution may have failed on rank {rank}', file=sys.stderr)
         
+        print(f'Waiting for barrier...')
         dist.barrier()
+        print(f'✓ Barrier completed')
 
         # Only rank 0 saves the result
         if rank == 0:
@@ -496,6 +687,7 @@ def discover_and_save_hostnames():
     except Exception as e:
         print(f'Error discovering hosts: {e}', file=sys.stderr)
         import traceback
+        print(f'Traceback:', file=sys.stderr)
         traceback.print_exc()
         return None
     finally:
@@ -525,14 +717,28 @@ def discover_and_save_hostnames():
 
 def main():
     """Main entry point"""
+    # Setup logging to file
+    setup_logging()
+    
     try:
         hostnames = discover_and_save_hostnames()
         if hostnames:
+            print(f'Cluster initialization completed successfully on rank 0')
+            print(f'Log file: {LOG_FILE}')
+            # Close log file handle
+            LogWriter.close_log_file()
             sys.exit(0)
         else:
+            print(f'Cluster initialization completed (rank > 0)')
+            # Close log file handle
+            LogWriter.close_log_file()
             sys.exit(0)  # Other ranks also exit successfully
     except Exception as e:
         print(f'Error: {e}', file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        # Close log file handle even on error
+        LogWriter.close_log_file()
         sys.exit(1)
 
 
