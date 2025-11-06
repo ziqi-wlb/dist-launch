@@ -45,7 +45,8 @@ def parse_args():
     parser.add_argument('--master-port', type=int, default=int(env_master_port) if env_master_port else 23456,
                        help='Master port (default: from MASTER_PORT env or 23456)')
     parser.add_argument('--nodes', type=str, default=None,
-                       help='Comma-separated list of node hostnames (auto-discover if not provided)')
+                       help='Comma-separated list of node hostnames (auto-discover if not provided). '
+                            'Useful for excluding bad nodes. Example: --nodes "node1,node2,node3" --world-size 3')
     # SSH configuration - allow override from environment variables
     env_ssh_key = os.environ.get('SSH_KEY', '')
     env_ssh_port = os.environ.get('SSH_PORT', '')
@@ -152,14 +153,14 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
         # doesn't automatically inherit environment variables from pytorch-job
         # We need to explicitly pass the correct env vars for each node
         exec_env = env_vars if env_vars else None
-        train_script_dir = os.path.dirname(train_script_abs) if os.path.dirname(train_script_abs) else os.getcwd()
-        train_script_name = os.path.basename(train_script_abs)
+        # Use absolute path for remote nodes to ensure script is found
+        # Assume all nodes have the same directory structure
         node_commands.append({
             'node': node,
             'type': 'remote',
             'env_vars': exec_env,
-            'command': f'bash {train_script_name}',
-            'work_dir': train_script_dir
+            'command': f'bash {train_script_abs}',
+            'work_dir': None  # Use absolute path, no need to cd
         })
     
     # Launch all remote nodes asynchronously (non-blocking)
@@ -200,19 +201,73 @@ def main():
         print('Error: --world-size is required or WORLD_SIZE env must be set')
         sys.exit(1)
     
-    # Auto-discover nodes if not provided
+    # Get nodes list
     if args.nodes:
+        # Manual node list specified
         nodes = [n.strip() for n in args.nodes.split(',')]
+        nodes = [n for n in nodes if n]  # Remove empty strings
+        print(f'Using manually specified {len(nodes)} nodes: {", ".join(nodes)}')
+        
+        # Validate node count matches world_size
+        if len(nodes) != args.world_size:
+            print(f'Warning: Number of specified nodes ({len(nodes)}) does not match world_size ({args.world_size})')
+            print(f'This is allowed for scenarios like excluding bad nodes, but ensure your training script handles this correctly')
+            
+            # If nodes count is less than world_size, warn but continue
+            if len(nodes) < args.world_size:
+                print(f'Note: Only {len(nodes)} nodes will be used, but WORLD_SIZE={args.world_size} will be set')
+                print(f'Make sure your training script can handle fewer nodes than WORLD_SIZE')
+            # If nodes count is more than world_size, use only first world_size nodes
+            elif len(nodes) > args.world_size:
+                print(f'Warning: More nodes specified than world_size, using first {args.world_size} nodes')
+                nodes = nodes[:args.world_size]
     else:
+        # Auto-discover nodes
         nodes = HostDiscovery.discover_all()
         if not nodes:
             print('Error: Cannot auto-discover nodes.')
             print('Make sure cluster was initialized (dist-launch wait) or provide --nodes argument')
+            print('Example: dist-launch run train.sh --nodes "node1,node2,node3" --world-size 3')
             sys.exit(1)
         print(f'Discovered {len(nodes)} nodes: {", ".join(nodes)}')
+        
+        # Validate discovered node count matches world_size
+        if len(nodes) != args.world_size:
+            print(f'Warning: Number of discovered nodes ({len(nodes)}) does not match world_size ({args.world_size})')
+            print(f'If you have bad nodes, use --nodes to specify only working nodes')
     
-    if len(nodes) != args.world_size:
-        print(f'Warning: Number of nodes ({len(nodes)}) does not match world_size ({args.world_size})')
+    # Validate that we have at least one node
+    if not nodes:
+        print('Error: No nodes specified or discovered')
+        sys.exit(1)
+    
+    # Ensure rank0 node is correctly set
+    # Rank0 should be the node where this script is running (current hostname)
+    current_hostname = os.environ.get('HOSTNAME', '')
+    if not current_hostname:
+        import socket
+        current_hostname = socket.gethostname()
+    
+    # If manually specifying nodes, ensure current hostname is rank0
+    if args.nodes:
+        if current_hostname not in nodes:
+            print(f'Warning: Current hostname ({current_hostname}) is not in the specified node list')
+            print(f'Adding current hostname as rank0 (first node)')
+            nodes.insert(0, current_hostname)
+            # Update world_size if needed
+            if len(nodes) > args.world_size:
+                print(f'Note: Node count ({len(nodes)}) now exceeds world_size ({args.world_size})')
+        elif nodes[0] != current_hostname:
+            # Current hostname is in list but not first - move it to first position
+            nodes.remove(current_hostname)
+            nodes.insert(0, current_hostname)
+            print(f'Reordered nodes to put current hostname ({current_hostname}) as rank0')
+    else:
+        # Auto-discovered: current hostname should already be rank0 from discovery
+        if current_hostname in nodes and nodes[0] != current_hostname:
+            nodes.remove(current_hostname)
+            nodes.insert(0, current_hostname)
+            print(f'Reordered discovered nodes to put current hostname ({current_hostname}) as rank0')
     
     # Create cluster
     cluster = create_cluster(nodes, args.master_addr, args.world_size)
