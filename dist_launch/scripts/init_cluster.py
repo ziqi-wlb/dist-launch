@@ -17,6 +17,10 @@ from pathlib import Path
 from datetime import datetime
 
 
+# Default SSH key paths - can be overridden via SSH_KEY and SSH_PUBLIC_KEY environment variables
+DEFAULT_SSH_KEY_PATH = '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa'
+DEFAULT_SSH_PUBLIC_KEY_PATH = '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub'
+
 # Log file path - can be configured via DIST_LAUNCH_LOG_FILE environment variable
 # Default: /tmp/dist-launch-init.log
 # If using shared storage, you can set it to a shared path like:
@@ -632,14 +636,30 @@ def discover_and_save_hostnames():
         print(f'Discovered {len(hostnames)} hostnames: {", ".join(hostnames)}')
         
         # Distribute SSH public key to all nodes
-        ssh_public_key = os.environ.get('SSH_PUBLIC_KEY', 
-                                       '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub')
+        # Support both SSH_KEY and SSH_PUBLIC_KEY environment variables
+        ssh_key = os.environ.get('SSH_KEY', '')
+        ssh_public_key = os.environ.get('SSH_PUBLIC_KEY', '')
+        
+        # If SSH_KEY is set, derive public key path
+        if ssh_key and not ssh_public_key:
+            ssh_public_key = ssh_key + '.pub'
+            print(f'Derived SSH public key path from SSH_KEY: {ssh_public_key}')
+        elif not ssh_public_key:
+            # Default fallback
+            ssh_public_key = DEFAULT_SSH_PUBLIC_KEY_PATH
+        
         print(f'Distributing SSH public key from {ssh_public_key}...')
         print(f'Public key file exists: {os.path.exists(ssh_public_key)}')
         if os.path.exists(ssh_public_key):
             with open(ssh_public_key, 'r') as f:
                 key_preview = f.read().strip()[:50]
                 print(f'Public key preview: {key_preview}...')
+        else:
+            print(f'Warning: SSH public key file not found at {ssh_public_key}')
+            if ssh_key:
+                print(f'SSH_KEY was set to: {ssh_key}')
+            if ssh_public_key != ssh_key + '.pub':
+                print(f'Trying alternative: {ssh_key}.pub' if ssh_key else 'No SSH_KEY set')
         
         print(f'Calling distribute_ssh_key...')
         success = distribute_ssh_key(hostnames, ssh_public_key)
@@ -673,9 +693,20 @@ def discover_and_save_hostnames():
             update_hosts_file(hostnames)
             
             # Update SSH config for easy login without specifying key
-            ssh_key_path = os.environ.get('SSH_KEY', '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa')
+            # Use the same SSH_KEY that was used for public key distribution
+            ssh_key_path = os.environ.get('SSH_KEY', '')
+            if not ssh_key_path:
+                # If SSH_KEY not set, try to derive from SSH_PUBLIC_KEY
+                ssh_public_key_env = os.environ.get('SSH_PUBLIC_KEY', '')
+                if ssh_public_key_env and ssh_public_key_env.endswith('.pub'):
+                    ssh_key_path = ssh_public_key_env[:-4]  # Remove .pub extension
+                else:
+                    # Default fallback
+                    ssh_key_path = DEFAULT_SSH_KEY_PATH
+            
             ssh_port = int(os.environ.get('SSH_PORT', '2025'))
             ssh_user = os.environ.get('SSH_USER', 'root')
+            print(f'Updating SSH config with key: {ssh_key_path}, port: {ssh_port}, user: {ssh_user}')
             update_ssh_config(hostnames, ssh_key_path, ssh_port, ssh_user)
             
             dist.barrier()
