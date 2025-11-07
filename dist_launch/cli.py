@@ -4,6 +4,8 @@ Command line interface for dist-launch
 """
 import sys
 import os
+import subprocess
+import argparse
 import importlib.util
 
 def get_package_dir():
@@ -55,14 +57,92 @@ def get_run_py():
     
     return run_py
 
+def setup_ssh_server(ssh_port=2025):
+    """
+    Configure and start SSH server
+    
+    Args:
+        ssh_port: SSH server port (default: 2025)
+    """
+    sshd_config = '/etc/ssh/sshd_config'
+    ssh_config_content = f'''# ====== custom override ======
+Port {ssh_port}
+PermitRootLogin prohibit-password
+PasswordAuthentication yes
+PubkeyAuthentication yes
+RSAAuthentication yes
+AllowUsers bushou root
+PermitEmptyPasswords no
+# =============================
+'''
+    
+    try:
+        # Check if running as root
+        if os.geteuid() != 0:
+            print(f'Warning: SSH server setup requires root privileges. Skipping...')
+            return False
+        
+        # Append SSH config to /etc/ssh/sshd_config
+        print(f'Configuring SSH server (port {ssh_port})...')
+        with open(sshd_config, 'a') as f:
+            f.write(ssh_config_content)
+        print(f'✓ SSH configuration added to {sshd_config}')
+        
+        # Restart SSH service
+        print('Restarting SSH service...')
+        result = subprocess.run(['service', 'ssh', 'restart'], 
+                              capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            print('✓ SSH service restarted successfully')
+            return True
+        else:
+            print(f'Warning: Failed to restart SSH service: {result.stderr}')
+            # Try alternative command
+            result = subprocess.run(['systemctl', 'restart', 'ssh'], 
+                                  capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                print('✓ SSH service restarted successfully (via systemctl)')
+                return True
+            else:
+                print(f'Warning: Failed to restart SSH service via systemctl: {result.stderr}')
+                return False
+    except Exception as e:
+        print(f'Warning: Failed to setup SSH server: {e}')
+        return False
+
 def cmd_wait(args):
-    """Execute wait.sh"""
+    """Execute wait.sh with optional SSH server setup"""
+    # Get default SSH port from environment variable or use 2025
+    default_ssh_port = 2025
+    if 'SSH_PORT' in os.environ:
+        try:
+            default_ssh_port = int(os.environ['SSH_PORT'])
+        except ValueError:
+            print(f'Warning: Invalid SSH_PORT environment variable value: {os.environ["SSH_PORT"]}, using default 2025')
+            default_ssh_port = 2025
+    
+    parser = argparse.ArgumentParser(description='Wait for debug mode')
+    parser.add_argument('--ssh-port', type=int, default=None,
+                       help=f'SSH server port to configure (default: {default_ssh_port} from SSH_PORT env or 2025, set to 0 to skip SSH setup)')
+    parser.add_argument('--no-ssh-setup', action='store_true',
+                       help='Skip SSH server setup')
+    
+    # Parse known args to extract --ssh-port and --no-ssh-setup
+    parsed_args, remaining_args = parser.parse_known_args(args)
+    
+    # Setup SSH server if requested
+    if not parsed_args.no_ssh_setup:
+        ssh_port = parsed_args.ssh_port if parsed_args.ssh_port is not None else default_ssh_port
+        if ssh_port > 0:
+            setup_ssh_server(ssh_port)
+    
+    # Execute wait.sh with remaining arguments
     wait_script = os.path.join(get_scripts_dir(), 'wait.sh')
     if not os.path.exists(wait_script):
         print(f'Error: {wait_script} not found')
         sys.exit(1)
     
-    cmd = ['bash', wait_script] + args
+    cmd = ['bash', wait_script] + remaining_args
     os.execvp('bash', cmd)
 
 def cmd_run(args):
@@ -123,10 +203,10 @@ def main():
     if len(sys.argv) < 2:
         print('Usage: dist-launch <command> [arguments]')
         print('Commands:')
-        print('  wait                    Wait for debug mode')
-        print('  run <train.sh> [opts]   Launch training on all nodes')
-        print('  kill [--force]          Kill all training processes started by dist-launch run')
-        print('  nccl-tests [opts]       Run NCCL performance tests using PyTorch distributed')
+        print('  wait [--ssh-port PORT] [--no-ssh-setup]  Wait for debug mode (auto-setup SSH server)')
+        print('  run <train.sh> [opts]                     Launch training on all nodes')
+        print('  kill [--force]                            Kill all training processes started by dist-launch run')
+        print('  nccl-tests [opts]                         Run NCCL performance tests using PyTorch distributed')
         sys.exit(1)
     
     command = sys.argv[1]
