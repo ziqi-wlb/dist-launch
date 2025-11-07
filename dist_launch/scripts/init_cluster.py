@@ -225,17 +225,21 @@ def detect_network_interfaces():
     return None
 
 
-def update_hosts_file(hostnames):
+def update_hosts_file(hostnames, hostname_to_ip=None):
     """
     Update /etc/hosts file on rank0 to add rank-0, rank-1, etc. aliases
     This allows easy login via ssh root@rank-1
     
     Args:
         hostnames: List of hostnames, ordered by rank
+        hostname_to_ip: Dictionary mapping hostname to IP address (optional, from allgather)
     
     Returns:
         True if successful
     """
+    if hostname_to_ip is None:
+        hostname_to_ip = {}
+    
     try:
         hosts_file = '/etc/hosts'
         hosts_backup = '/etc/hosts.dist-launch.backup'
@@ -259,18 +263,19 @@ def update_hosts_file(hostnames):
         lines = current_hosts.split('\n')
         filtered_lines = [line for line in lines if 'dist-launch' not in line.lower() and 'auto-launch' not in line.lower()]
         
-        # Get IP addresses for each hostname
+        # Get IP addresses for each hostname (only from allgather, no DNS)
         rank_entries = []
         for rank, hostname in enumerate(hostnames):
-            try:
-                # Try to get IP address
-                ip = socket.gethostbyname(hostname)
+            # Only use IP from allgather, no DNS resolution
+            if hostname in hostname_to_ip:
+                ip = hostname_to_ip[hostname]
                 rank_alias = f'rank-{rank}'
                 entry = f'{ip}\t{rank_alias}\t# dist-launch: rank{rank} -> {hostname}'
                 rank_entries.append(entry)
-            except socket.gaierror:
-                # If hostname resolution fails, try to get IP from current node's hostname
-                print(f'Warning: Could not resolve {hostname}, skipping hosts entry', file=sys.stderr)
+                print(f'Added hosts entry: rank{rank} ({hostname}) -> {ip}')
+            else:
+                # If IP not available from allgather, skip this entry
+                print(f'Warning: No IP address available for {hostname} (rank {rank}), skipping hosts entry', file=sys.stderr)
         
         # Write updated hosts file
         new_hosts = '\n'.join(filtered_lines)
@@ -601,37 +606,88 @@ def discover_and_save_hostnames():
         rank = dist.get_rank()
         print(f'Confirmed: world_size={world_size}, rank={rank}')
         
-        # Get current hostname
+        # Get current hostname and IP address
         current_hostname = os.environ.get('HOSTNAME', '')
         if not current_hostname:
             import socket
             current_hostname = socket.gethostname()
         print(f'Current hostname: {current_hostname}')
         
-        # Convert hostname to tensor for allgather
+        # Get current node's IP address (no DNS resolution)
+        # Method: Get IP from network interfaces by connecting to external address
+        current_ip = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # Connect to a remote address (doesn't actually send data)
+                # This gets the local IP address used for the connection
+                s.connect(('8.8.8.8', 80))
+                current_ip = s.getsockname()[0]
+            except Exception as e:
+                print(f'Warning: Could not get IP via socket connection: {e}', file=sys.stderr)
+            finally:
+                s.close()
+        except Exception as e:
+            print(f'Warning: Could not create socket to get IP: {e}', file=sys.stderr)
+        
+        if not current_ip:
+            # Fallback: try to get IP from hostname (but this might use DNS)
+            # Only as last resort
+            try:
+                current_ip = socket.gethostbyname(current_hostname)
+                print(f'Got IP via hostname resolution: {current_ip}')
+            except (socket.gaierror, socket.herror):
+                # If hostname is already an IP address, use it directly
+                import re
+                ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+                if re.match(ip_pattern, current_hostname):
+                    current_ip = current_hostname
+                    print(f'Hostname appears to be an IP address: {current_ip}')
+                else:
+                    print(f'Error: Could not determine IP address for {current_hostname}', file=sys.stderr)
+                    current_ip = current_hostname  # Use hostname as fallback
+        else:
+            print(f'Current IP address: {current_ip}')
+        
+        # Convert hostname and IP to bytes for allgather
         hostname_bytes = current_hostname.encode('utf-8')
+        ip_bytes = current_ip.encode('utf-8')
         max_len = 256
         hostname_bytes = hostname_bytes[:max_len].ljust(max_len, b'\0')
+        ip_bytes = ip_bytes[:max_len].ljust(max_len, b'\0')
         
-        # Create tensor for allgather
+        # Create tensors for allgather (hostname and IP)
         if torch.cuda.is_available():
-            local_tensor = torch.ByteTensor(list(hostname_bytes)).cuda()
-            gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+            local_hostname_tensor = torch.ByteTensor(list(hostname_bytes)).cuda()
+            local_ip_tensor = torch.ByteTensor(list(ip_bytes)).cuda()
+            gathered_hostname_tensors = [torch.zeros_like(local_hostname_tensor) for _ in range(world_size)]
+            gathered_ip_tensors = [torch.zeros_like(local_ip_tensor) for _ in range(world_size)]
         else:
-            local_tensor = torch.ByteTensor(list(hostname_bytes))
-            gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+            local_hostname_tensor = torch.ByteTensor(list(hostname_bytes))
+            local_ip_tensor = torch.ByteTensor(list(ip_bytes))
+            gathered_hostname_tensors = [torch.zeros_like(local_hostname_tensor) for _ in range(world_size)]
+            gathered_ip_tensors = [torch.zeros_like(local_ip_tensor) for _ in range(world_size)]
         
-        print(f'Gathering hostnames from all nodes...')
-        dist.all_gather(gathered_tensors, local_tensor)
-        print(f'✓ Hostname gathering completed')
+        print(f'Gathering hostnames and IP addresses from all nodes...')
+        dist.all_gather(gathered_hostname_tensors, local_hostname_tensor)
+        dist.all_gather(gathered_ip_tensors, local_ip_tensor)
+        print(f'✓ Hostname and IP gathering completed')
         
-        # Extract hostnames from gathered tensors
+        # Extract hostnames and IPs from gathered tensors
         hostnames = []
-        for tensor in gathered_tensors:
-            hostname_bytes = bytes(tensor.cpu().tolist() if torch.cuda.is_available() else tensor.tolist()).rstrip(b'\0')
+        hostname_to_ip = {}
+        for i, (hostname_tensor, ip_tensor) in enumerate(zip(gathered_hostname_tensors, gathered_ip_tensors)):
+            hostname_bytes = bytes(hostname_tensor.cpu().tolist() if torch.cuda.is_available() else hostname_tensor.tolist()).rstrip(b'\0')
+            ip_bytes = bytes(ip_tensor.cpu().tolist() if torch.cuda.is_available() else ip_tensor.tolist()).rstrip(b'\0')
             hostname = hostname_bytes.decode('utf-8', errors='ignore')
+            ip = ip_bytes.decode('utf-8', errors='ignore')
             if hostname:
                 hostnames.append(hostname)
+                if ip:
+                    hostname_to_ip[hostname] = ip
+                    print(f'  Rank {i}: {hostname} -> {ip}')
+                else:
+                    print(f'  Rank {i}: {hostname} -> (no IP)')
         
         print(f'Discovered {len(hostnames)} hostnames: {", ".join(hostnames)}')
         
@@ -690,7 +746,7 @@ def discover_and_save_hostnames():
             print(f'Cluster info saved to {info_file}')
             print(f'Discovered {len(hostnames)} nodes: {", ".join(hostnames)}')
             
-            update_hosts_file(hostnames)
+            update_hosts_file(hostnames, hostname_to_ip)
             
             # Update SSH config for easy login without specifying key
             # Use the same SSH_KEY that was used for public key distribution
