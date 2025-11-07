@@ -97,6 +97,27 @@ def cmd_kill(args):
     cmd = ['python3', kill_py] + args
     os.execvp('python3', cmd)
 
+def cmd_nccl_tests(args):
+    """Execute NCCL tests via run.py"""
+    # Get nccl_tests.sh wrapper script path
+    scripts_dir = get_scripts_dir()
+    nccl_tests_sh = os.path.join(scripts_dir, 'nccl_tests.sh')
+    
+    if not os.path.exists(nccl_tests_sh):
+        print(f'Error: {nccl_tests_sh} not found')
+        sys.exit(1)
+    
+    # Get run.py path
+    run_py = get_run_py()
+    if not os.path.exists(run_py):
+        print(f'Error: {run_py} not found')
+        sys.exit(1)
+    
+    # Launch via run.py, passing nccl_tests.sh as the script and args as additional options
+    # The args will be passed to nccl_tests.sh, which will pass them to nccl_tests.py
+    cmd = ['python3', run_py, nccl_tests_sh] + args
+    os.execvp('python3', cmd)
+
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
@@ -105,6 +126,7 @@ def main():
         print('  wait                    Wait for debug mode')
         print('  run <train.sh> [opts]   Launch training on all nodes')
         print('  kill [--force]          Kill all training processes started by dist-launch run')
+        print('  nccl-tests [opts]       Run NCCL performance tests using PyTorch distributed')
         sys.exit(1)
     
     command = sys.argv[1]
@@ -116,9 +138,11 @@ def main():
         cmd_run(args)
     elif command == 'kill':
         cmd_kill(args)
+    elif command == 'nccl-tests':
+        cmd_nccl_tests(args)
     else:
         print(f'Error: Unknown command: {command}')
-        print('Available commands: wait, run, kill')
+        print('Available commands: wait, run, kill, nccl-tests')
         sys.exit(1)
 
 if __name__ == '__main__':
