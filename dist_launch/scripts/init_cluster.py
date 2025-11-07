@@ -609,7 +609,6 @@ def discover_and_save_hostnames():
         # Get current hostname and IP address
         current_hostname = os.environ.get('HOSTNAME', '')
         if not current_hostname:
-            import socket
             current_hostname = socket.gethostname()
         print(f'Current hostname: {current_hostname}')
         
@@ -636,7 +635,7 @@ def discover_and_save_hostnames():
             try:
                 current_ip = socket.gethostbyname(current_hostname)
                 print(f'Got IP via hostname resolution: {current_ip}')
-            except (socket.gaierror, socket.herror):
+            except (socket.gaierror, socket.herror) as e:
                 # If hostname is already an IP address, use it directly
                 import re
                 ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
@@ -644,7 +643,7 @@ def discover_and_save_hostnames():
                     current_ip = current_hostname
                     print(f'Hostname appears to be an IP address: {current_ip}')
                 else:
-                    print(f'Error: Could not determine IP address for {current_hostname}', file=sys.stderr)
+                    print(f'Error: Could not determine IP address for {current_hostname}: {e}', file=sys.stderr)
                     current_ip = current_hostname  # Use hostname as fallback
         else:
             print(f'Current IP address: {current_ip}')
