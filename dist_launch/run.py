@@ -48,13 +48,14 @@ def parse_args():
                        help='Comma-separated list of node hostnames (auto-discover if not provided). '
                             'Useful for excluding bad nodes. Example: --nodes "node1,node2,node3" --world-size 3')
     # SSH configuration - allow override from environment variables
+    from dist_launch import get_project_ssh_key_path
     env_ssh_key = os.environ.get('SSH_KEY', '')
     env_ssh_port = os.environ.get('SSH_PORT', '')
     env_ssh_user = os.environ.get('SSH_USER', '')
     
     parser.add_argument('--ssh-key', type=str,
-                       default=env_ssh_key if env_ssh_key else '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa',
-                       help='Path to SSH private key (default: from SSH_KEY env or /mnt/3fs/...)')
+                       default=env_ssh_key if env_ssh_key else get_project_ssh_key_path(),
+                       help='Path to SSH private key (default: from SSH_KEY env or project ssh-key)')
     parser.add_argument('--ssh-port', type=int, 
                        default=int(env_ssh_port) if env_ssh_port and env_ssh_port.isdigit() else 2025,
                        help='SSH port (default: from SSH_PORT env or 2025)')

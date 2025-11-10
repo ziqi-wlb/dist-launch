@@ -5,8 +5,14 @@
 set -e
 
 CLUSTER_INFO_FILE="${CLUSTER_INFO_FILE:-/tmp/cluster_info.json}"
-SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub}"
-SSH_KEY="${SSH_KEY:-/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa}"
+
+# Get SSH key paths from project (if not set via env)
+if [ -z "$SSH_KEY" ]; then
+    SSH_KEY=$(python3 -c "from dist_launch import get_project_ssh_key_path; print(get_project_ssh_key_path())" 2>/dev/null || echo "/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa")
+fi
+if [ -z "$SSH_PUBLIC_KEY" ]; then
+    SSH_PUBLIC_KEY=$(python3 -c "from dist_launch import get_project_ssh_public_key_path; print(get_project_ssh_public_key_path())" 2>/dev/null || echo "/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub")
+fi
 SSH_PORT="${SSH_PORT:-2025}"
 SSH_USER="${SSH_USER:-root}"
 

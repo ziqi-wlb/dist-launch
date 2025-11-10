@@ -33,7 +33,12 @@ MASTER_ADDR="${MASTER_ADDR:-}"
 WORLD_SIZE="${WORLD_SIZE:-}"
 MASTER_PORT="${MASTER_PORT:-23456}"
 NODES="${NODES:-}"  # Auto-discover if not set
-SSH_KEY="${SSH_KEY:-/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa}"
+
+# Get SSH key path from project (if not set via env)
+if [ -z "$SSH_KEY" ]; then
+    # Try to get from Python package
+    SSH_KEY=$(python3 -c "from dist_launch import get_project_ssh_key_path; print(get_project_ssh_key_path())" 2>/dev/null || echo "/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa")
+fi
 SSH_PORT="${SSH_PORT:-2025}"
 SSH_USER="${SSH_USER:-root}"
 

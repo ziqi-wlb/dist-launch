@@ -70,7 +70,6 @@ Port {ssh_port}
 PermitRootLogin prohibit-password
 PasswordAuthentication yes
 PubkeyAuthentication yes
-RSAAuthentication yes
 AllowUsers bushou root
 PermitEmptyPasswords no
 # =============================
@@ -90,21 +89,44 @@ PermitEmptyPasswords no
         
         # Restart SSH service
         print('Restarting SSH service...')
+        print(f'Executing: service ssh restart')
         result = subprocess.run(['service', 'ssh', 'restart'], 
                               capture_output=True, text=True, timeout=30)
+        if result.stdout:
+            print(f'Command stdout: {result.stdout}')
+        if result.stderr:
+            print(f'Command stderr: {result.stderr}')
+        print(f'Command return code: {result.returncode}')
+        
         if result.returncode == 0:
             print('✓ SSH service restarted successfully')
             return True
         else:
-            print(f'Warning: Failed to restart SSH service: {result.stderr}')
+            print(f'Warning: Failed to restart SSH service (return code: {result.returncode})')
+            if result.stderr:
+                print(f'Error output: {result.stderr}')
+            if result.stdout:
+                print(f'Output: {result.stdout}')
+            
             # Try alternative command
+            print(f'Trying alternative: systemctl restart ssh')
             result = subprocess.run(['systemctl', 'restart', 'ssh'], 
                                   capture_output=True, text=True, timeout=30)
+            if result.stdout:
+                print(f'Command stdout: {result.stdout}')
+            if result.stderr:
+                print(f'Command stderr: {result.stderr}')
+            print(f'Command return code: {result.returncode}')
+            
             if result.returncode == 0:
                 print('✓ SSH service restarted successfully (via systemctl)')
                 return True
             else:
-                print(f'Warning: Failed to restart SSH service via systemctl: {result.stderr}')
+                print(f'Warning: Failed to restart SSH service via systemctl (return code: {result.returncode})')
+                if result.stderr:
+                    print(f'Error output: {result.stderr}')
+                if result.stdout:
+                    print(f'Output: {result.stdout}')
                 return False
     except Exception as e:
         print(f'Warning: Failed to setup SSH server: {e}')

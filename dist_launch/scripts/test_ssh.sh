@@ -11,7 +11,11 @@ if [ $# -eq 0 ]; then
 fi
 
 HOSTNAME="$1"
-SSH_KEY="${SSH_KEY:-/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa}"
+
+# Get SSH key path from project (if not set via env)
+if [ -z "$SSH_KEY" ]; then
+    SSH_KEY=$(python3 -c "from dist_launch import get_project_ssh_key_path; print(get_project_ssh_key_path())" 2>/dev/null || echo "/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa")
+fi
 SSH_PORT="${SSH_PORT:-2025}"
 SSH_USER="${SSH_USER:-root}"
 

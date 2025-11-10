@@ -6,20 +6,31 @@ import os
 from typing import List, Dict, Optional
 from cluster_manager import NodeConfig
 
+# Import function to get project SSH key path
+try:
+    from dist_launch import get_project_ssh_key_path
+except ImportError:
+    # Fallback for direct import
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from dist_launch import get_project_ssh_key_path
+
 
 class NodeExecutor:
     """Executes commands on remote nodes via SSH"""
     
-    def __init__(self, ssh_key_path: str = '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa',
+    def __init__(self, ssh_key_path: str = None,
                  ssh_port: int = 2025, ssh_user: str = 'root'):
         """
         Initialize node executor
         
         Args:
-            ssh_key_path: Path to SSH private key
+            ssh_key_path: Path to SSH private key (default: from project ssh-key)
             ssh_port: SSH port (default 2025)
             ssh_user: SSH username
         """
+        if ssh_key_path is None:
+            ssh_key_path = get_project_ssh_key_path()
         self.ssh_key_path = ssh_key_path
         self.ssh_port = ssh_port
         self.ssh_user = ssh_user

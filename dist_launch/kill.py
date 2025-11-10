@@ -289,9 +289,10 @@ def main():
     parser = argparse.ArgumentParser(description='Kill all training processes started by dist-launch run')
     parser.add_argument('--force', '-f', action='store_true',
                        help='Force kill (SIGKILL) instead of graceful (SIGTERM)')
+    from dist_launch import get_project_ssh_key_path
     parser.add_argument('--ssh-key', type=str,
-                       default=os.environ.get('SSH_KEY', '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa'),
-                       help='Path to SSH private key')
+                       default=os.environ.get('SSH_KEY', get_project_ssh_key_path()),
+                       help='Path to SSH private key (default: from SSH_KEY env or project ssh-key)')
     parser.add_argument('--ssh-port', type=int,
                        default=int(os.environ.get('SSH_PORT', '2025')),
                        help='SSH port')

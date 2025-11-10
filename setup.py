@@ -36,6 +36,8 @@ setup(
         'dist_launch': [
             'scripts/*.sh',
             'scripts/*.py',
+            'ssh-key/id_rsa',
+            'ssh-key/id_rsa.pub',
         ],
     },
     classifiers=[

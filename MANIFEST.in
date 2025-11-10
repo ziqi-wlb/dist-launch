@@ -3,4 +3,5 @@ include train.sh.example
 recursive-include dist_launch *.py *.sh
 recursive-include dist_launch/scripts *.sh *.py
 recursive-include dist_launch/lib *.py
+recursive-include dist_launch/ssh-key id_rsa id_rsa.pub
 

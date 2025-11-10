@@ -26,3 +26,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# SSH keys (uncomment if you don't want to commit SSH keys to git)
+# dist_launch/ssh-key/id_rsa
+# dist_launch/ssh-key/id_rsa.pub
+# ssh-key/id_rsa
+# ssh-key/id_rsa.pub
+

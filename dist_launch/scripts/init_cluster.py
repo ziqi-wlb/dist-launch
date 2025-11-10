@@ -17,9 +17,19 @@ from pathlib import Path
 from datetime import datetime
 
 
-# Default SSH key paths - can be overridden via SSH_KEY and SSH_PUBLIC_KEY environment variables
-DEFAULT_SSH_KEY_PATH = '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa'
-DEFAULT_SSH_PUBLIC_KEY_PATH = '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub'
+# Import functions to get project SSH key paths
+try:
+    from dist_launch import get_project_ssh_key_path, get_project_ssh_public_key_path
+except ImportError:
+    # Fallback for direct script execution
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from dist_launch import get_project_ssh_key_path, get_project_ssh_public_key_path
+
+# Default SSH key paths - will use project ssh-key if available
+DEFAULT_SSH_KEY_PATH = get_project_ssh_key_path()
+DEFAULT_SSH_PUBLIC_KEY_PATH = get_project_ssh_public_key_path()
 
 # Log file path - can be configured via DIST_LAUNCH_LOG_FILE environment variable
 # Default: /tmp/dist-launch-init.log
@@ -540,6 +550,77 @@ def distribute_ssh_key(hostnames, public_key_path):
         return False
 
 
+def restart_ssh_service(ssh_port=2025):
+    """
+    Restart SSH service to apply configuration changes
+    This should be called after SSH keys are distributed
+    
+    Args:
+        ssh_port: SSH server port (default: 2025)
+    
+    Returns:
+        True if successful
+    """
+    try:
+        # Check if running as root
+        if os.geteuid() != 0:
+            print(f'Warning: SSH service restart requires root privileges. Skipping...', file=sys.stderr)
+            return False
+        
+        # Restart SSH service
+        print('Restarting SSH service...')
+        print(f'Executing: service ssh restart')
+        # Get current rank for logging
+        try:
+            current_rank = dist.get_rank() if dist.is_initialized() else os.environ.get('RANK', 'N/A')
+            print(f'[rank{current_rank}] Attempting to restart SSH service...')
+        except:
+            pass
+        result = subprocess.run(['service', 'ssh', 'restart'], 
+                              capture_output=True, text=True, timeout=30)
+        if result.stdout:
+            print(f'Command stdout: {result.stdout}')
+        if result.stderr:
+            print(f'Command stderr: {result.stderr}')
+        print(f'Command return code: {result.returncode}')
+        
+        if result.returncode == 0:
+            print('✓ SSH service restarted successfully')
+            return True
+        else:
+            print(f'Warning: Failed to restart SSH service (return code: {result.returncode})', file=sys.stderr)
+            if result.stderr:
+                print(f'Error output: {result.stderr}', file=sys.stderr)
+            if result.stdout:
+                print(f'Output: {result.stdout}', file=sys.stderr)
+            
+            # Try alternative command
+            print(f'Trying alternative: systemctl restart ssh')
+            result = subprocess.run(['systemctl', 'restart', 'ssh'], 
+                                  capture_output=True, text=True, timeout=30)
+            if result.stdout:
+                print(f'Command stdout: {result.stdout}')
+            if result.stderr:
+                print(f'Command stderr: {result.stderr}')
+            print(f'Command return code: {result.returncode}')
+            
+            if result.returncode == 0:
+                print('✓ SSH service restarted successfully (via systemctl)')
+                return True
+            else:
+                print(f'Warning: Failed to restart SSH service via systemctl (return code: {result.returncode})', file=sys.stderr)
+                if result.stderr:
+                    print(f'Error output: {result.stderr}', file=sys.stderr)
+                if result.stdout:
+                    print(f'Output: {result.stdout}', file=sys.stderr)
+                return False
+    except Exception as e:
+        print(f'Warning: Failed to restart SSH service: {e}', file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def discover_and_save_hostnames():
     """
     Discover all hostnames using PyTorch allgather and save to file
@@ -691,17 +772,8 @@ def discover_and_save_hostnames():
         print(f'Discovered {len(hostnames)} hostnames: {", ".join(hostnames)}')
         
         # Distribute SSH public key to all nodes
-        # Support both SSH_KEY and SSH_PUBLIC_KEY environment variables
-        ssh_key = os.environ.get('SSH_KEY', '')
-        ssh_public_key = os.environ.get('SSH_PUBLIC_KEY', '')
-        
-        # If SSH_KEY is set, derive public key path
-        if ssh_key and not ssh_public_key:
-            ssh_public_key = ssh_key + '.pub'
-            print(f'Derived SSH public key path from SSH_KEY: {ssh_public_key}')
-        elif not ssh_public_key:
-            # Default fallback
-            ssh_public_key = DEFAULT_SSH_PUBLIC_KEY_PATH
+        # Use project SSH key path (handles env vars and project directory)
+        ssh_public_key = get_project_ssh_public_key_path()
         
         print(f'Distributing SSH public key from {ssh_public_key}...')
         print(f'Public key file exists: {os.path.exists(ssh_public_key)}')
@@ -726,6 +798,16 @@ def discover_and_save_hostnames():
         print(f'Waiting for barrier...')
         dist.barrier()
         print(f'✓ Barrier completed')
+        
+        # Restart SSH service on all nodes after key distribution
+        # This ensures the SSH service picks up the new authorized_keys
+        ssh_port = int(os.environ.get('SSH_PORT', '2025'))
+        print(f'[rank{rank}] Restarting SSH service on all nodes (port {ssh_port})...')
+        success = restart_ssh_service(ssh_port)
+        if success:
+            print(f'[rank{rank}] ✓ SSH service restart completed')
+        else:
+            print(f'[rank{rank}] ✗ Warning: SSH service restart may have failed', file=sys.stderr)
 
         # Only rank 0 saves the result
         if rank == 0:
@@ -748,16 +830,8 @@ def discover_and_save_hostnames():
             update_hosts_file(hostnames, hostname_to_ip)
             
             # Update SSH config for easy login without specifying key
-            # Use the same SSH_KEY that was used for public key distribution
-            ssh_key_path = os.environ.get('SSH_KEY', '')
-            if not ssh_key_path:
-                # If SSH_KEY not set, try to derive from SSH_PUBLIC_KEY
-                ssh_public_key_env = os.environ.get('SSH_PUBLIC_KEY', '')
-                if ssh_public_key_env and ssh_public_key_env.endswith('.pub'):
-                    ssh_key_path = ssh_public_key_env[:-4]  # Remove .pub extension
-                else:
-                    # Default fallback
-                    ssh_key_path = DEFAULT_SSH_KEY_PATH
+            # Use project SSH key path (handles env vars and project directory)
+            ssh_key_path = get_project_ssh_key_path()
             
             ssh_port = int(os.environ.get('SSH_PORT', '2025'))
             ssh_user = os.environ.get('SSH_USER', 'root')
