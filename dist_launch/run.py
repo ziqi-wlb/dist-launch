@@ -68,6 +68,8 @@ def parse_args():
                        help='Wait for all processes to complete (default: True)')
     parser.add_argument('--no-wait', dest='wait', action='store_false',
                        help='Do not wait for processes to complete')
+    parser.add_argument('--nper-node', type=int, default=None,
+                       help='Number of GPUs per node (default: 1). If specified, WORLD_SIZE will be num_nodes * nper_node')
     
     return parser.parse_args()
 
@@ -98,7 +100,8 @@ def create_cluster(nodes: List[str], master_addr: str, world_size: int) -> Clust
 
 
 def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_script: str,
-                   dry_run: bool = False, wait: bool = False, use_existing_env: bool = True) -> tuple:
+                   dry_run: bool = False, wait: bool = False, use_existing_env: bool = True,
+                   nper_node: int = 1) -> tuple:
     """
     Launch training on all nodes
     
@@ -109,6 +112,7 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
         dry_run: Whether to only show commands
         wait: Whether to wait for completion
         use_existing_env: If True, use existing env vars from image
+        nper_node: Number of GPUs per node (default: 1)
         
     Returns:
         List of process objects
@@ -124,45 +128,60 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
     else:
         train_script_abs = train_script
     
-    print(f'Launching training on {len(all_nodes)} nodes...')
+    print(f'Launching training on {len(all_nodes)} nodes with {nper_node} GPU(s) per node...')
     
-    # Prepare all nodes first (collect commands and env vars)
-    # This ensures all nodes start as simultaneously as possible
+    # Prepare all processes (one per GPU per node)
+    # This ensures all processes start as simultaneously as possible
     node_commands = []
     for node in all_nodes:
-        env_vars = cluster.get_node_env(node, use_existing=use_existing_env)
-        env_str = ' '.join([f'{k}="{v}"' for k, v in env_vars.items()]) if env_vars else ''
-        command = f'{env_str} bash {train_script_abs}'.strip()
-        
-        if dry_run:
-            print(f'[DRY RUN] Node {node.name} (rank {node.rank}): {command}')
-            continue
-        
-        if node.rank == 0:
-            # Rank0 will be executed locally, store for later launch
+        for local_rank in range(nper_node):
+            # Calculate global rank: node_rank * nper_node + local_rank
+            global_rank = node.node_rank * nper_node + local_rank
+            
+            # Get base env vars for this node
+            env_vars = cluster.get_node_env(node, use_existing=use_existing_env)
+            # Override RANK with global rank
+            env_vars['RANK'] = str(global_rank)
+            # Set LOCAL_RANK
+            env_vars['LOCAL_RANK'] = str(local_rank)
+            # Update WORLD_SIZE to total number of processes
+            env_vars['WORLD_SIZE'] = str(len(all_nodes) * nper_node)
+            
+            env_str = ' '.join([f'{k}="{v}"' for k, v in env_vars.items()]) if env_vars else ''
+            command = f'{env_str} bash {train_script_abs}'.strip()
+            
+            if dry_run:
+                print(f'[DRY RUN] Node {node.name} (node_rank {node.node_rank}, local_rank {local_rank}, global_rank {global_rank}): {command}')
+                continue
+            
+            if node.node_rank == 0:
+                # All processes on rank0 node are local
+                node_commands.append({
+                    'node': node,
+                    'local_rank': local_rank,
+                    'global_rank': global_rank,
+                    'type': 'local',
+                    'env_vars': env_vars,
+                    'command': command,
+                    'train_script_abs': train_script_abs
+                })
+                continue
+            
+            # Remote nodes - prepare for async launch
+            # Always pass env vars to remote nodes via SSH, because SSH non-interactive shell
+            # doesn't automatically inherit environment variables from pytorch-job
+            exec_env = env_vars if env_vars else None
+            # Use absolute path for remote nodes to ensure script is found
+            # Assume all nodes have the same directory structure
             node_commands.append({
                 'node': node,
-                'type': 'local',
-                'env_vars': env_vars,
-                'command': command,
-                'train_script_abs': train_script_abs
+                'local_rank': local_rank,
+                'global_rank': global_rank,
+                'type': 'remote',
+                'env_vars': exec_env,
+                'command': f'bash {train_script_abs}',
+                'work_dir': None  # Use absolute path, no need to cd
             })
-            continue
-        
-        # Remote nodes - prepare for async launch
-        # Always pass env vars to remote nodes via SSH, because SSH non-interactive shell
-        # doesn't automatically inherit environment variables from pytorch-job
-        # We need to explicitly pass the correct env vars for each node
-        exec_env = env_vars if env_vars else None
-        # Use absolute path for remote nodes to ensure script is found
-        # Assume all nodes have the same directory structure
-        node_commands.append({
-            'node': node,
-            'type': 'remote',
-            'env_vars': exec_env,
-            'command': f'bash {train_script_abs}',
-            'work_dir': None  # Use absolute path, no need to cd
-        })
     
     # Launch all remote nodes asynchronously (non-blocking)
     # This ensures all nodes start as simultaneously as possible for distributed training
@@ -172,7 +191,9 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
     # Launch all remote nodes in quick succession (all are non-blocking)
     for cmd_info in remote_nodes_to_launch:
         node = cmd_info['node']
-        print(f'Launching on node {node.name} (rank {node.rank})...')
+        local_rank = cmd_info.get('local_rank', 0)
+        global_rank = cmd_info.get('global_rank', node.rank)
+        print(f'Launching on node {node.name} (node_rank {node.node_rank}, local_rank {local_rank}, global_rank {global_rank})...')
         try:
             process = executor.execute(
                 node, 
@@ -198,6 +219,12 @@ def main():
         print('Error: --master-addr is required or MASTER_ADDR env must be set')
         sys.exit(1)
     
+    # Handle nper_node parameter
+    nper_node = args.nper_node if args.nper_node is not None else 1
+    
+    # If nper_node is specified, world_size should be num_nodes * nper_node
+    # But if world_size is explicitly set, we use it as total number of processes
+    # Otherwise, world_size is number of nodes
     if args.world_size is None or args.world_size <= 0:
         print('Error: --world-size is required or WORLD_SIZE env must be set')
         sys.exit(1)
@@ -270,8 +297,21 @@ def main():
             nodes.insert(0, current_hostname)
             print(f'Reordered discovered nodes to put current hostname ({current_hostname}) as rank0')
     
-    # Create cluster
-    cluster = create_cluster(nodes, args.master_addr, args.world_size)
+    # Calculate actual world_size: if nper_node > 1, world_size should be num_nodes * nper_node
+    # But if world_size is explicitly set, we treat it as total number of processes
+    num_nodes = len(nodes)
+    if nper_node > 1:
+        # If nper_node is specified, world_size should be num_nodes * nper_node
+        actual_world_size = num_nodes * nper_node
+        if args.world_size != actual_world_size:
+            print(f'Note: With {num_nodes} nodes and {nper_node} GPUs per node, total processes = {actual_world_size}')
+            print(f'Updating world_size from {args.world_size} to {actual_world_size}')
+            args.world_size = actual_world_size
+    else:
+        actual_world_size = args.world_size
+    
+    # Create cluster (world_size here is number of nodes, not total processes)
+    cluster = create_cluster(nodes, args.master_addr, num_nodes)
     
     executor = NodeExecutor(
         ssh_key_path=args.ssh_key,
@@ -306,53 +346,64 @@ def main():
     # Launch training - returns (processes, node_commands)
     processes, node_commands = launch_training(cluster, executor, args.train_script,
                                                dry_run=args.dry_run, wait=args.wait,
-                                               use_existing_env=use_existing_env)
+                                               use_existing_env=use_existing_env,
+                                               nper_node=nper_node)
     
-    # Launch rank0 locally immediately after remote nodes (for synchronous startup)
+    # Launch all local processes (rank0 node with potentially multiple GPUs)
     if not args.dry_run:
-        # Find rank0 command info
-        rank0_cmd_info = None
-        for cmd_info in node_commands:
-            if cmd_info.get('type') == 'local':
-                rank0_cmd_info = cmd_info
-                break
+        # Find all local command info (all processes on rank0 node)
+        local_cmd_infos = [cmd_info for cmd_info in node_commands if cmd_info.get('type') == 'local']
         
-        if rank0_cmd_info:
-            rank0_node = rank0_cmd_info['node']
-            env_vars = rank0_cmd_info['env_vars']
-            train_script_abs = rank0_cmd_info['train_script_abs']
-            
-            # Prepare environment for rank0
-            # If use_existing_env is True, use existing env vars from pytorch-job
-            # Only add missing env vars, don't override existing ones
-            if use_existing_env:
-                full_env = os.environ.copy()
-                # Only add env vars that are not already set
-                for key, value in env_vars.items():
-                    if key not in full_env:
-                        full_env[key] = value
-            else:
-                full_env = os.environ.copy()
-                full_env.update(env_vars)
-            
-            print(f'\nLaunching rank0 locally...')
-            
+        if local_cmd_infos:
             # Save process info for kill command
             pid_info_file = '/tmp/dist-launch-pids.json'
             pid_info = {
-                'train_script': train_script_abs,
-                'rank0_pid': None,
+                'train_script': local_cmd_infos[0]['train_script_abs'],
+                'local_pids': [],
                 'remote_processes': []
             }
             
+            print(f'\nLaunching {len(local_cmd_infos)} local process(es) on rank0 node...')
+            
+            local_processes = []  # Track all local processes
+            
             if args.wait:
-                # Execute rank0 immediately (all nodes should start around the same time)
-                # This ensures distributed training can establish connections properly
-                rank0_process = subprocess.Popen(
-                    ['bash', train_script_abs],
-                    env=full_env
-                )
-                pid_info['rank0_pid'] = rank0_process.pid
+                # Launch all local processes (for multi-GPU, launch all GPUs on rank0 node)
+                for cmd_info in local_cmd_infos:
+                    env_vars = cmd_info['env_vars']
+                    train_script_abs = cmd_info['train_script_abs']
+                    local_rank = cmd_info.get('local_rank', 0)
+                    global_rank = cmd_info.get('global_rank', 0)
+                    
+                    # Prepare environment for this process
+                    # If use_existing_env is True, use existing env vars from pytorch-job
+                    # But always override critical distributed training vars (RANK, WORLD_SIZE, LOCAL_RANK, etc.)
+                    if use_existing_env:
+                        full_env = os.environ.copy()
+                        # Critical distributed training env vars that must be overridden
+                        critical_vars = ['RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT', 
+                                        'PET_NODE_RANK', 'PET_MASTER_ADDR', 'PET_MASTER_PORT']
+                        for key, value in env_vars.items():
+                            # Always override critical vars, even if they exist
+                            if key in critical_vars or key not in full_env:
+                                full_env[key] = value
+                    else:
+                        full_env = os.environ.copy()
+                        full_env.update(env_vars)
+                    
+                    print(f'  Launching local process (local_rank={local_rank}, global_rank={global_rank})...')
+                    print(f'    Env: RANK={full_env.get("RANK")}, WORLD_SIZE={full_env.get("WORLD_SIZE")}, LOCAL_RANK={full_env.get("LOCAL_RANK")}, MASTER_ADDR={full_env.get("MASTER_ADDR")}, MASTER_PORT={full_env.get("MASTER_PORT")}')
+                    local_process = subprocess.Popen(
+                        ['bash', train_script_abs],
+                        env=full_env
+                    )
+                    local_processes.append((cmd_info, local_process))
+                    pid_info['local_pids'].append({
+                        'pid': local_process.pid,
+                        'local_rank': local_rank,
+                        'global_rank': global_rank
+                    })
+                    print(f'    ✓ Launched (PID: {local_process.pid})')
                 
                 # Save remote process info
                 for node, process in processes:
@@ -374,34 +425,79 @@ def main():
                 # Wait for all processes to complete
                 print('\nWaiting for all processes to complete...')
                 
-                # Wait for rank0
-                rank0_process.wait()
-                if rank0_process.returncode == 0:
-                    print(f'  ✓ rank0 completed successfully')
-                else:
-                    print(f'  ✗ rank0 failed with return code {rank0_process.returncode}')
+                # Wait for all local processes
+                all_local_success = True
+                for cmd_info, local_process in local_processes:
+                    local_rank = cmd_info.get('local_rank', 0)
+                    global_rank = cmd_info.get('global_rank', 0)
+                    local_process.wait()
+                    if local_process.returncode == 0:
+                        print(f'  ✓ Local process (local_rank={local_rank}, global_rank={global_rank}) completed successfully')
+                    else:
+                        print(f'  ✗ Local process (local_rank={local_rank}, global_rank={global_rank}) failed with return code {local_process.returncode}')
+                        all_local_success = False
                 
-                # Wait for other nodes
-                # Note: stdout/stderr are None (redirected to terminal), so logs are already visible
+                # Wait for all remote processes
+                all_remote_success = True
                 for node, process in processes:
                     try:
-                        print(f'\nWaiting for {node.name} (rank {node.rank}) to complete...')
+                        # Calculate local_rank and global_rank for remote processes
+                        node_rank = node.node_rank
+                        local_rank = (node.rank % nper_node) if nper_node > 1 else 0
+                        global_rank = node.rank
+                        print(f'\nWaiting for {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) to complete...')
                         process.wait()
                         if process.returncode == 0:
-                            print(f'  ✓ {node.name} (rank {node.rank}) completed successfully')
+                            print(f'  ✓ {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) completed successfully')
                         else:
-                            print(f'  ✗ {node.name} (rank {node.rank}) failed with return code {process.returncode}')
+                            print(f'  ✗ {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) failed with return code {process.returncode}')
+                            all_remote_success = False
                     except Exception as e:
                         print(f'  ✗ {node.name} (rank {node.rank}) error: {e}')
+                        all_remote_success = False
+                
+                if all_local_success and all_remote_success:
+                    print('\n✓ All processes completed successfully')
+                    sys.exit(0)
+                else:
+                    print('\n✗ Some processes failed')
+                    sys.exit(1)
             else:
-                # Execute rank0 in background
-                rank0_process = subprocess.Popen(
-                    ['bash', train_script_abs],
-                    env=full_env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                pid_info['rank0_pid'] = rank0_process.pid
+                # Execute all local processes in background
+                for cmd_info in local_cmd_infos:
+                    env_vars = cmd_info['env_vars']
+                    train_script_abs = cmd_info['train_script_abs']
+                    local_rank = cmd_info.get('local_rank', 0)
+                    global_rank = cmd_info.get('global_rank', 0)
+                    
+                    # Prepare environment
+                    # Critical distributed training env vars that must be overridden
+                    critical_vars = ['RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT', 
+                                    'PET_NODE_RANK', 'PET_MASTER_ADDR', 'PET_MASTER_PORT']
+                    if use_existing_env:
+                        full_env = os.environ.copy()
+                        for key, value in env_vars.items():
+                            # Always override critical vars, even if they exist
+                            if key in critical_vars or key not in full_env:
+                                full_env[key] = value
+                    else:
+                        full_env = os.environ.copy()
+                        full_env.update(env_vars)
+                    
+                    print(f'  Launching local process (local_rank={local_rank}, global_rank={global_rank}) in background...')
+                    print(f'    Env: RANK={full_env.get("RANK")}, WORLD_SIZE={full_env.get("WORLD_SIZE")}, LOCAL_RANK={full_env.get("LOCAL_RANK")}, MASTER_ADDR={full_env.get("MASTER_ADDR")}, MASTER_PORT={full_env.get("MASTER_PORT")}')
+                    local_process = subprocess.Popen(
+                        ['bash', train_script_abs],
+                        env=full_env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    local_processes.append((cmd_info, local_process))
+                    pid_info['local_pids'].append({
+                        'pid': local_process.pid,
+                        'local_rank': local_rank,
+                        'global_rank': global_rank
+                    })
                 
                 # Save remote process info
                 for node, process in processes:
