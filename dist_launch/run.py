@@ -120,15 +120,34 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
     processes = []
     all_nodes = cluster.get_all_nodes()
     
-    # Convert train_script to absolute path if it's relative
-    if not os.path.isabs(train_script):
-        # Use current working directory
-        cwd = os.getcwd()
-        train_script_abs = os.path.join(cwd, train_script)
-    else:
+    # Get current working directory (master's working directory)
+    # All nodes should execute commands/scripts in the same directory
+    master_work_dir = os.getcwd()
+    
+    # Check if train_script is a file or a command
+    # If it's a file, use absolute path; if it's a command (like 'pwd'), use it directly
+    if os.path.isfile(train_script):
+        # It's a file - convert to absolute path if relative
+        if not os.path.isabs(train_script):
+            train_script_abs = os.path.join(master_work_dir, train_script)
+        else:
+            train_script_abs = train_script
+        # Use bash to execute the script
+        command_template = 'bash {script}'
+        is_command = False
+    elif os.path.isabs(train_script) and os.path.isfile(train_script):
+        # Absolute path to existing file
         train_script_abs = train_script
+        command_template = 'bash {script}'
+        is_command = False
+    else:
+        # It's a command (like 'pwd', 'ls -la', etc.) - use it directly
+        train_script_abs = train_script
+        command_template = '{script}'  # Execute directly, not via bash
+        is_command = True
     
     print(f'Launching training on {len(all_nodes)} nodes with {nper_node} GPU(s) per node...')
+    print(f'Working directory: {master_work_dir}')
     
     # Prepare all processes (one per GPU per node)
     # This ensures all processes start as simultaneously as possible
@@ -148,7 +167,9 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
             env_vars['WORLD_SIZE'] = str(len(all_nodes) * nper_node)
             
             env_str = ' '.join([f'{k}="{v}"' for k, v in env_vars.items()]) if env_vars else ''
-            command = f'{env_str} bash {train_script_abs}'.strip()
+            # Use command_template to handle both scripts and commands
+            script_cmd = command_template.format(script=train_script_abs)
+            command = f'{env_str} {script_cmd}'.strip()
             
             if dry_run:
                 print(f'[DRY RUN] Node {node.name} (node_rank {node.node_rank}, local_rank {local_rank}, global_rank {global_rank}): {command}')
@@ -163,7 +184,10 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
                     'type': 'local',
                     'env_vars': env_vars,
                     'command': command,
-                    'train_script_abs': train_script_abs
+                    'train_script_abs': train_script_abs,
+                    'is_command': is_command,
+                    'command_template': command_template,
+                    'work_dir': master_work_dir
                 })
                 continue
             
@@ -171,16 +195,18 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
             # Always pass env vars to remote nodes via SSH, because SSH non-interactive shell
             # doesn't automatically inherit environment variables from pytorch-job
             exec_env = env_vars if env_vars else None
-            # Use absolute path for remote nodes to ensure script is found
-            # Assume all nodes have the same directory structure
+            # Use command_template for remote nodes too
+            remote_script_cmd = command_template.format(script=train_script_abs)
             node_commands.append({
                 'node': node,
                 'local_rank': local_rank,
                 'global_rank': global_rank,
                 'type': 'remote',
                 'env_vars': exec_env,
-                'command': f'bash {train_script_abs}',
-                'work_dir': None  # Use absolute path, no need to cd
+                'command': remote_script_cmd,
+                'work_dir': master_work_dir,  # All nodes execute in same directory as master
+                'is_command': is_command,
+                'command_template': command_template
             })
     
     # Launch all remote nodes asynchronously (non-blocking)
@@ -207,7 +233,7 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
         except Exception as e:
             print(f'  ✗ Failed to launch: {e}')
     
-    return processes, node_commands
+    return processes, node_commands, master_work_dir
 
 
 def main():
@@ -343,11 +369,11 @@ def main():
     if os.environ.get('DIST_LAUNCH_OVERRIDE_ENV', '').lower() in ('1', 'true', 'yes'):
         use_existing_env = False
     
-    # Launch training - returns (processes, node_commands)
-    processes, node_commands = launch_training(cluster, executor, args.train_script,
-                                               dry_run=args.dry_run, wait=args.wait,
-                                               use_existing_env=use_existing_env,
-                                               nper_node=nper_node)
+    # Launch training - returns (processes, node_commands, master_work_dir)
+    processes, node_commands, master_work_dir = launch_training(cluster, executor, args.train_script,
+                                                                dry_run=args.dry_run, wait=args.wait,
+                                                                use_existing_env=use_existing_env,
+                                                                nper_node=nper_node)
     
     # Launch all local processes (rank0 node with potentially multiple GPUs)
     if not args.dry_run:
@@ -393,10 +419,24 @@ def main():
                     
                     print(f'  Launching local process (local_rank={local_rank}, global_rank={global_rank})...')
                     print(f'    Env: RANK={full_env.get("RANK")}, WORLD_SIZE={full_env.get("WORLD_SIZE")}, LOCAL_RANK={full_env.get("LOCAL_RANK")}, MASTER_ADDR={full_env.get("MASTER_ADDR")}, MASTER_PORT={full_env.get("MASTER_PORT")}')
-                    local_process = subprocess.Popen(
-                        ['bash', train_script_abs],
-                        env=full_env
-                    )
+                    # Use command_template to handle both scripts and commands
+                    is_cmd = cmd_info.get('is_command', False)
+                    work_dir = cmd_info.get('work_dir', master_work_dir)
+                    if is_cmd:
+                        # For commands, use shell=True and execute directly
+                        local_process = subprocess.Popen(
+                            train_script_abs,
+                            env=full_env,
+                            shell=True,
+                            cwd=work_dir
+                        )
+                    else:
+                        # For scripts, use bash
+                        local_process = subprocess.Popen(
+                            ['bash', train_script_abs],
+                            env=full_env,
+                            cwd=work_dir
+                        )
                     local_processes.append((cmd_info, local_process))
                     pid_info['local_pids'].append({
                         'pid': local_process.pid,
@@ -486,12 +526,28 @@ def main():
                     
                     print(f'  Launching local process (local_rank={local_rank}, global_rank={global_rank}) in background...')
                     print(f'    Env: RANK={full_env.get("RANK")}, WORLD_SIZE={full_env.get("WORLD_SIZE")}, LOCAL_RANK={full_env.get("LOCAL_RANK")}, MASTER_ADDR={full_env.get("MASTER_ADDR")}, MASTER_PORT={full_env.get("MASTER_PORT")}')
-                    local_process = subprocess.Popen(
-                        ['bash', train_script_abs],
-                        env=full_env,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
+                    # Use command_template to handle both scripts and commands
+                    is_cmd = cmd_info.get('is_command', False)
+                    work_dir = cmd_info.get('work_dir', master_work_dir)
+                    if is_cmd:
+                        # For commands, use shell=True and execute directly
+                        local_process = subprocess.Popen(
+                            train_script_abs,
+                            env=full_env,
+                            shell=True,
+                            cwd=work_dir,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
+                    else:
+                        # For scripts, use bash
+                        local_process = subprocess.Popen(
+                            ['bash', train_script_abs],
+                            env=full_env,
+                            cwd=work_dir,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
                     local_processes.append((cmd_info, local_process))
                     pid_info['local_pids'].append({
                         'pid': local_process.pid,
