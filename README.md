@@ -1,41 +1,17 @@
-# Dist Launch - 一键启动集群训练工具（Debug模式）
+# Dist Launch - 一键启动集群训练工具
 
 ## 功能说明
 
-支持Debug模式：集群启动后pending等待，在rank0节点上一键启动整个集群的训练任务。
+支持类似pai-dlc等k8s的pytorch-job任务，进行批量一键启动任务：集群启动后进入pending等待，在rank0节点上一键启动整个集群的训练任务，方便调试，不会因为命令失败则整个集群被杀掉。
 
 ## 安装
-
-### 方式1：作为Python包安装（推荐）
-
-```bash
-# 开发模式安装（可编辑）
-pip install -e .
-
-# 或用户安装（无需root权限）
-pip install --user -e .
-```
 
 安装后可直接使用`dist-launch`命令：
 
 ```bash
+pip install dist-launch
 dist-launch wait              # 进入等待模式
 dist-launch run train.sh      # 启动训练
-```
-
-### 方式2：直接使用（无需安装）
-
-```bash
-# 使用统一命令（开发模式）
-./dist-launch wait
-./dist-launch run train.sh
-
-# 或安装后使用
-dist-launch wait
-dist-launch run train.sh
-
-# 或直接使用run.sh
-bash dist_launch/scripts/run.sh train.sh
 ```
 
 ## 项目结构
@@ -69,14 +45,8 @@ dist-launch/
 在DLC任务启动时，所有节点执行初始化脚本：
 
 ```bash
-# 在所有节点上执行（通常通过torchrun或启动脚本）
-# 如果已安装包：
+# 在所有节点上执行，如果已安装包：
 dist-launch wait
-
-# 或开发模式：
-cd /path/to/dist-launch
-python3 dist_launch/scripts/init_cluster.py
-bash dist_launch/scripts/wait.sh
 ```
 
 或者集成到启动脚本中：
@@ -99,15 +69,7 @@ bash /path/to/dist-launch/dist_launch/scripts/wait.sh
 登录rank0节点，准备`train.sh`训练脚本，然后执行：
 
 ```bash
-# 如果已安装包：
 dist-launch run train.sh
-
-# 或开发模式：
-cd /path/to/dist-launch
-./dist-launch run train.sh
-
-# 或直接使用run.sh：
-bash /path/to/dist-launch/dist_launch/scripts/run.sh train.sh
 ```
 
 **功能：**
@@ -120,6 +82,49 @@ bash /path/to/dist-launch/dist_launch/scripts/run.sh train.sh
 - `dist-launch wait` - 进入等待模式（集群初始化后等待调试）
 - `dist-launch run <train.sh>` - 一键启动训练（train.sh作为第一个参数）
 - `dist-launch kill [--force]` - 一键停止所有训练进程（不会停止wait进程）
+- `dist-launch nccl-tests [options]` - 运行NCCL性能测试
+
+### 3. NCCL性能测试
+
+使用 `dist-launch nccl-tests` 命令可以测试集群的网络带宽性能：
+
+```bash
+# 基本使用（默认测试 allreduce，大小 1,10,100,1000 MB）
+dist-launch nccl-tests
+
+# 测试多个操作
+dist-launch nccl-tests --operations allreduce,allgather,broadcast
+
+# 自定义测试大小
+dist-launch nccl-tests --sizes 10,100,1000,10000
+
+# 2机4卡测试
+dist-launch nccl-tests --nper-node 4 --world-size 2
+
+# 使用 float16 数据类型
+dist-launch nccl-tests --dtype float16
+
+# 增加迭代次数以获得更准确的结果
+dist-launch nccl-tests --iterations 50
+```
+
+**输出说明：**
+- **Algorithm bandwidth (algo_bw)**: 算法带宽，表示每秒钟实际处理的数据量（GB/s）
+- **Bus bandwidth (bus_bw)**: 总线带宽，表示在总线上实际传输的数据量（GB/s）
+  - 对于 Allreduce: bus_bw ≈ algo_bw * 2 * (nRanks - 1) / nRanks
+  - 对于 Allgather/Broadcast: bus_bw ≈ algo_bw * (nRanks - 1)
+
+**选项说明：**
+- `--operations`: 要测试的操作，可选值：`allreduce`, `allgather`, `broadcast`（默认：`allreduce`）
+- `--sizes`: 测试的数据大小（MB），逗号分隔（默认：`1,10,100,1000`）
+- `--iterations`: 每个测试的迭代次数（默认：`20`）
+- `--dtype`: 数据类型，可选值：`float32`, `float16`, `int32`（默认：`float32`）
+- `--nper-node`: 每个节点的GPU数量（默认：自动检测）
+
+**注意事项：**
+- 测试结果会显示算法带宽和总线带宽两种指标
+- 总线带宽通常高于算法带宽，因为它反映了总线上传输的总数据量
+- 对于多机测试，确保所有节点都能访问相同的网络路径
 
 ## 环境变量
 
@@ -140,8 +145,8 @@ export SSH_PUBLIC_KEY="/path/to/ssh-key/id_rsa.pub"  # 默认值：/path/to/ssh-
 - `MASTER_PORT`: Master端口（训练阶段使用）
 - `INIT_MASTER_PORT`: 初始化阶段使用的端口（可选，默认：MASTER_PORT + 1，避免与训练端口冲突）
 
-**GB200专用NCCL配置**（自动设置）：
-- `NCCL_SOCKET_IFNAME`: 网络接口名称（自动通过`ifconfig`或`ip addr`检测，优先使用GB200接口模式如`enP*`，失败则回退到默认值`enP22p3s0f0np0,enP6p3s0f0np0`）
+**nccl-socket自动设置**：
+- `NCCL_SOCKET_IFNAME`: 网络接口名称（自动通过`ifconfig`或`ip addr`检测，比如使用GB200接口模式时`enP*`，失败则回退到默认值`enP22p3s0f0np0,enP6p3s0f0np0`）
 - `NCCL_IB_DISABLE`: 禁用InfiniBand（默认：`1`）
 
 这些NCCL环境变量会在集群初始化时自动设置，可通过环境变量覆盖。`NCCL_SOCKET_IFNAME`会自动检测当前系统的网络接口，无需手动配置。

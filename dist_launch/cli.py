@@ -201,6 +201,40 @@ def cmd_kill(args):
 
 def cmd_nccl_tests(args):
     """Execute NCCL tests via run.py"""
+    # Handle --help directly to show nccl_tests.py help instead of run.py help
+    if '--help' in args or '-h' in args:
+        # Import and show nccl_tests.py help directly
+        try:
+            # Get nccl_tests.py path
+            package_dir = get_package_dir()
+            nccl_tests_py = os.path.join(package_dir, 'nccl_tests.py')
+            
+            # Fallback for development mode
+            if not os.path.exists(nccl_tests_py):
+                nccl_tests_py = os.path.join(os.path.dirname(package_dir), 'nccl_tests.py')
+            
+            if os.path.exists(nccl_tests_py):
+                # Run nccl_tests.py with --help to show its help
+                cmd = ['python3', nccl_tests_py, '--help']
+                os.execvp('python3', cmd)
+            else:
+                # Fallback: try to import and call main with --help
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("nccl_tests", nccl_tests_py)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    # Temporarily set sys.argv to show help
+                    old_argv = sys.argv
+                    sys.argv = ['nccl_tests.py', '--help']
+                    try:
+                        spec.loader.exec_module(module)
+                    finally:
+                        sys.argv = old_argv
+                    sys.exit(0)
+        except Exception as e:
+            print(f'Error showing help: {e}', file=sys.stderr)
+            # Fall through to normal execution
+    
     # Get nccl_tests.sh wrapper script path
     scripts_dir = get_scripts_dir()
     nccl_tests_sh = os.path.join(scripts_dir, 'nccl_tests.sh')
@@ -222,14 +256,82 @@ def cmd_nccl_tests(args):
 
 def main():
     """Main entry point"""
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or sys.argv[1] in ['-h', '--help', 'help']:
+        print('Dist Launch - 一键启动集群训练工具（Debug模式）')
+        print()
         print('Usage: dist-launch <command> [arguments]')
+        print()
         print('Commands:')
-        print('  wait [--ssh-port PORT] [--no-ssh-setup]  Wait for debug mode (auto-setup SSH server)')
-        print('  run <train.sh> [opts]                     Launch training on all nodes')
-        print('  kill [--force]                            Kill all training processes started by dist-launch run')
-        print('  nccl-tests [opts]                         Run NCCL performance tests using PyTorch distributed')
-        sys.exit(1)
+        print('  wait [--ssh-port PORT] [--no-ssh-setup]')
+        print('      Wait for debug mode (auto-setup SSH server)')
+        print('      This command initializes the cluster and keeps nodes alive for debugging.')
+        print('      It should be run on all nodes when the cluster starts.')
+        print()
+        print('      Options:')
+        print('        --ssh-port PORT     SSH server port to configure (default: 2025)')
+        print('        --no-ssh-setup      Skip SSH server setup')
+        print()
+        print('  run <train.sh> [options]')
+        print('      Launch training script on all nodes')
+        print('      This command reads cluster info and executes the script on all nodes via SSH.')
+        print('      It should be run on rank0 node after cluster initialization.')
+        print()
+        print('      Options:')
+        print('        --master-addr ADDR   Master node address (default: from MASTER_ADDR env)')
+        print('        --world-size N      Total number of nodes (default: from WORLD_SIZE env)')
+        print('        --master-port PORT  Master port (default: 23456)')
+        print('        --nodes NODES        Comma-separated node list (default: auto-discover)')
+        print('        --ssh-key PATH      SSH private key path (default: from project)')
+        print('        --ssh-port PORT     SSH port (default: 2025)')
+        print('        --ssh-user USER     SSH username (default: root)')
+        print('        --nper-node N       Number of GPUs per node (default: 1)')
+        print('        --wait               Wait for all processes to complete (default: True)')
+        print('        --no-wait            Launch processes in background')
+        print('        --dry-run            Show commands without executing')
+        print()
+        print('      Examples:')
+        print('        dist-launch run train.sh')
+        print('        dist-launch run train.sh --nper-node 4 --world-size 2')
+        print('        dist-launch run "pwd"  # Execute command directly')
+        print()
+        print('  kill [--force]')
+        print('      Kill all training processes started by dist-launch run')
+        print('      This command stops all processes on all nodes that were started via dist-launch run.')
+        print('      It does not stop wait processes.')
+        print()
+        print('      Options:')
+        print('        --force             Force kill processes (SIGKILL instead of SIGTERM)')
+        print()
+        print('  nccl-tests [options]')
+        print('      Run NCCL performance tests using PyTorch distributed')
+        print('      This command runs collective communication tests (Allreduce, Allgather, Broadcast)')
+        print('      across multiple GPUs and nodes to measure network bandwidth.')
+        print()
+        print('      Options:')
+        print('        --operations OPS    Comma-separated list of operations to test: allreduce, allgather, broadcast')
+        print('                            (default: allreduce)')
+        print('        --sizes SIZES       Comma-separated list of sizes in MB to test (default: 1,10,100,1000)')
+        print('        --iterations N      Number of iterations per test (default: 20)')
+        print('        --dtype TYPE       Data type to use: float32, float16, or int32 (default: float32)')
+        print('        --nper-node N      Number of GPUs per node. If not specified, auto-detects from')
+        print('                            CUDA_VISIBLE_DEVICES or uses 1')
+        print()
+        print('      Examples:')
+        print('        # Run allreduce test with default settings')
+        print('        dist-launch nccl-tests')
+        print()
+        print('        # Test multiple operations with custom sizes')
+        print('        dist-launch nccl-tests --operations allreduce,allgather --sizes 10,100,1000')
+        print()
+        print('        # 2 nodes, 4 GPUs per node')
+        print('        dist-launch nccl-tests --nper-node 4 --world-size 2')
+        print()
+        print('      Note: This command must be run via "dist-launch nccl-tests" or')
+        print('            "dist-launch run nccl_tests.sh". Environment variables')
+        print('            (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT) are set automatically.')
+        print()
+        print('For more information, see README.md')
+        sys.exit(0 if sys.argv[1] in ['-h', '--help', 'help'] else 1)
     
     command = sys.argv[1]
     args = sys.argv[2:]

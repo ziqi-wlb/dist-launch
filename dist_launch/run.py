@@ -71,7 +71,14 @@ def parse_args():
     parser.add_argument('--nper-node', type=int, default=None,
                        help='Number of GPUs per node (default: 1). If specified, WORLD_SIZE will be num_nodes * nper_node')
     
-    return parser.parse_args()
+    # Use parse_known_args to allow unknown arguments to be passed to the script
+    # This is needed for commands like nccl-tests that have their own arguments
+    args, unknown_args = parser.parse_known_args()
+    
+    # Store unknown args as an attribute so they can be passed to the script
+    args.script_args = unknown_args
+    
+    return args
 
 
 def create_cluster(nodes: List[str], master_addr: str, world_size: int) -> ClusterManager:
@@ -101,7 +108,7 @@ def create_cluster(nodes: List[str], master_addr: str, world_size: int) -> Clust
 
 def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_script: str,
                    dry_run: bool = False, wait: bool = False, use_existing_env: bool = True,
-                   nper_node: int = 1) -> tuple:
+                   nper_node: int = 1, script_args: list = None) -> tuple:
     """
     Launch training on all nodes
     
@@ -119,6 +126,10 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
     """
     processes = []
     all_nodes = cluster.get_all_nodes()
+    
+    # Initialize script_args if not provided
+    if script_args is None:
+        script_args = []
     
     # Get current working directory (master's working directory)
     # All nodes should execute commands/scripts in the same directory
@@ -169,6 +180,9 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
             env_str = ' '.join([f'{k}="{v}"' for k, v in env_vars.items()]) if env_vars else ''
             # Use command_template to handle both scripts and commands
             script_cmd = command_template.format(script=train_script_abs)
+            # Append script arguments if any
+            if script_args:
+                script_cmd = f'{script_cmd} {" ".join(script_args)}'
             command = f'{env_str} {script_cmd}'.strip()
             
             if dry_run:
@@ -226,6 +240,9 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
                 exec_env.update(env_vars)
             # Use command_template for remote nodes too
             remote_script_cmd = command_template.format(script=train_script_abs)
+            # Append script arguments if any
+            if script_args:
+                remote_script_cmd = f'{remote_script_cmd} {" ".join(script_args)}'
             node_commands.append({
                 'node': node,
                 'local_rank': local_rank,
@@ -399,10 +416,12 @@ def main():
         use_existing_env = False
     
     # Launch training - returns (processes, node_commands, master_work_dir)
+    script_args = getattr(args, 'script_args', [])
     processes, node_commands, master_work_dir = launch_training(cluster, executor, args.train_script,
                                                                 dry_run=args.dry_run, wait=args.wait,
                                                                 use_existing_env=use_existing_env,
-                                                                nper_node=nper_node)
+                                                                nper_node=nper_node,
+                                                                script_args=script_args)
     
     # Launch all local processes (rank0 node with potentially multiple GPUs)
     if not args.dry_run:

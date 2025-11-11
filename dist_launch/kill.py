@@ -106,9 +106,9 @@ def kill_remote_process(executor: NodeExecutor, node: NodeConfig, pid: int, name
         if train_script:
             script_name = os.path.basename(train_script)
             # Find processes matching the training script, excluding SSH and wait processes
-            find_training_cmd = f'ps aux | grep -E "{script_name}|train\.sh|torchrun" | grep -v grep | grep -v "wait.sh" | grep -v "ssh.*root@" | head -1'
+            find_training_cmd = f'ps aux | grep -E "{script_name}|train[.]sh|torchrun|nccl_tests[.]sh|nccl_tests[.]py" | grep -v grep | grep -v "wait.sh" | grep -v "ssh.*root@" | head -1'
         else:
-            find_training_cmd = f'ps aux | grep -E "train\.sh|torchrun|debug_redmoe" | grep -v grep | grep -v "wait.sh" | grep -v "ssh.*root@" | head -1'
+            find_training_cmd = f'ps aux | grep -E "train[.]sh|torchrun|debug_redmoe|nccl_tests[.]sh|nccl_tests[.]py" | grep -v grep | grep -v "wait.sh" | grep -v "ssh.*root@" | head -1'
         
         result = executor.execute_sync(node, find_training_cmd)
         
@@ -188,18 +188,74 @@ def kill_all_processes(force: bool = False, executor: Optional[NodeExecutor] = N
     
     killed_count = 0
     total_count = 0
+    processed_pids = set()  # Track PIDs we've already processed to avoid duplicates
     
-    # Kill local rank0 process
-    if 'rank0_pid' in process_info:
+    # Kill local processes (support both old rank0_pid and new local_pids format)
+    train_script = process_info.get('train_script', '')
+    
+    # Handle new format: local_pids (for multi-GPU scenarios)
+    if 'local_pids' in process_info:
+        local_pids = process_info['local_pids']
+        for proc_info in local_pids:
+            total_count += 1
+            pid = proc_info.get('pid', -1)
+            local_rank = proc_info.get('local_rank', 0)
+            global_rank = proc_info.get('global_rank', 0)
+            
+            if pid == -1:
+                continue
+            
+            # Try to find the actual training process (not just the bash wrapper)
+            # The saved PID might be the bash process, but we need to kill the training script
+            if train_script:
+                script_name = os.path.basename(train_script)
+                # Find processes matching the training script, including nccl_tests
+                try:
+                    result = subprocess.run(
+                        ['ps', 'aux'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        for line in result.stdout.split('\n'):
+                            if (script_name in line or 'nccl_tests' in line) and 'grep' not in line and 'wait.sh' not in line:
+                                parts = line.split()
+                                if len(parts) >= 2:
+                                    try:
+                                        found_pid = int(parts[1])
+                                        # Use this PID if it's different from saved PID or if it's a child process
+                                        if found_pid != pid:
+                                            # Check if it's a child of the saved PID
+                                            try:
+                                                parent_pid = int(parts[1]) if len(parts) > 1 else -1
+                                                # If found PID is a child or parent, use it
+                                                if found_pid != pid:
+                                                    print(f'  Found training process on local node: PID {found_pid} (saved PID was {pid})')
+                                                    pid = found_pid
+                                                    break
+                                            except (ValueError, IndexError):
+                                                pass
+                                    except (ValueError, IndexError):
+                                        pass
+                except Exception:
+                    pass
+            
+            name = f'rank{global_rank} (local_rank={local_rank})'
+            if pid not in processed_pids:
+                processed_pids.add(pid)
+                if kill_local_process(pid, name, force=force, kill_tree=True):
+                    killed_count += 1
+    
+    # Handle old format: rank0_pid (for backward compatibility)
+    elif 'rank0_pid' in process_info:
         total_count += 1
         rank0_pid = process_info['rank0_pid']
         
         # Try to find the actual training process (not just the bash wrapper)
-        # The saved PID might be the bash process, but we need to kill the training script and torchrun
-        train_script = process_info.get('train_script', '')
         if train_script:
             script_name = os.path.basename(train_script)
-            # Find processes matching the training script
+            # Find processes matching the training script, including nccl_tests
             try:
                 result = subprocess.run(
                     ['ps', 'aux'],
@@ -209,12 +265,11 @@ def kill_all_processes(force: bool = False, executor: Optional[NodeExecutor] = N
                 )
                 if result.returncode == 0:
                     for line in result.stdout.split('\n'):
-                        if script_name in line and 'grep' not in line and 'wait.sh' not in line:
+                        if (script_name in line or 'nccl_tests' in line) and 'grep' not in line and 'wait.sh' not in line:
                             parts = line.split()
                             if len(parts) >= 2:
                                 try:
                                     found_pid = int(parts[1])
-                                    # Use this PID if it's different from saved PID
                                     if found_pid != rank0_pid:
                                         print(f'  Found training process on local node: PID {found_pid} (saved PID was {rank0_pid})')
                                         rank0_pid = found_pid
@@ -224,9 +279,51 @@ def kill_all_processes(force: bool = False, executor: Optional[NodeExecutor] = N
             except Exception:
                 pass
         
-        # Also kill any child processes (training scripts, torchrun, etc.)
-        if kill_local_process(rank0_pid, 'rank0', force=force, kill_tree=True):
-            killed_count += 1
+        if rank0_pid not in processed_pids:
+            processed_pids.add(rank0_pid)
+            if kill_local_process(rank0_pid, 'rank0', force=force, kill_tree=True):
+                killed_count += 1
+    
+    # Also kill any remaining training processes that might not be in the PID file
+    # This handles cases where processes were started but not properly recorded
+    if train_script:
+        script_name = os.path.basename(train_script)
+        # Find all processes matching the script name or nccl_tests
+        try:
+            result = subprocess.run(
+                ['ps', 'aux'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if (script_name in line or 'nccl_tests' in line) and 'grep' not in line and 'wait.sh' not in line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                found_pid = int(parts[1])
+                                # Skip if we've already processed this PID
+                                if found_pid in processed_pids:
+                                    continue
+                                # Check if this PID is a wait process
+                                try:
+                                    cmdline_file = f'/proc/{found_pid}/cmdline'
+                                    if os.path.exists(cmdline_file):
+                                        with open(cmdline_file, 'r') as f:
+                                            cmdline = f.read()
+                                            if 'wait.sh' not in cmdline and 'dist-launch wait' not in cmdline:
+                                                # Kill this process
+                                                processed_pids.add(found_pid)
+                                                if kill_local_process(found_pid, f'training process (PID {found_pid})', force=force, kill_tree=True):
+                                                    killed_count += 1
+                                                    total_count += 1
+                                except Exception:
+                                    pass
+                            except (ValueError, IndexError):
+                                pass
+        except Exception:
+            pass
     
     # Kill remote processes in parallel
     if 'remote_processes' in process_info and executor:

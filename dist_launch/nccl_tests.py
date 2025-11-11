@@ -7,9 +7,22 @@ import os
 import sys
 import argparse
 import time
-import torch
-import torch.distributed as dist
 from typing import List, Optional
+
+# Delay torch import to avoid UCC library conflicts
+# Import torch only once in _ensure_torch_imported() function
+torch = None
+dist = None
+
+def _ensure_torch_imported():
+    """Ensure torch and dist are imported (only import once)"""
+    global torch, dist
+    if torch is None or dist is None:
+        import torch as _torch
+        import torch.distributed as _dist
+        torch = _torch
+        dist = _dist
+    return torch, dist
 
 # Add lib directory to path
 lib_path = os.path.join(os.path.dirname(__file__), 'lib')
@@ -34,6 +47,9 @@ def test_allreduce(size_mb: int, iterations: int, dtype: str = 'float32'):
         iterations: Number of iterations
         dtype: Data type (float32, float16, int32)
     """
+    # Ensure torch and dist are imported
+    _ensure_torch_imported()
+    
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -100,6 +116,9 @@ def test_allgather(size_mb: int, iterations: int, dtype: str = 'float32'):
         iterations: Number of iterations
         dtype: Data type (float32, float16, int32)
     """
+    # Ensure torch and dist are imported
+    _ensure_torch_imported()
+    
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -168,6 +187,9 @@ def test_broadcast(size_mb: int, iterations: int, dtype: str = 'float32'):
         iterations: Number of iterations
         dtype: Data type (float32, float16, int32)
     """
+    # Ensure torch and dist are imported
+    _ensure_torch_imported()
+    
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
@@ -234,6 +256,9 @@ def run_nccl_tests(operations: List[str], sizes_mb: List[int], iterations: int, 
         iterations: Number of iterations per test
         dtype: Data type to use
     """
+    # Ensure torch and dist are imported
+    _ensure_torch_imported()
+    
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     
@@ -325,6 +350,15 @@ Environment variables (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT) are set autom
                        dest='nper_node',
                        help='Number of GPUs per node. If not specified, auto-detects from CUDA_VISIBLE_DEVICES or uses 1')
     args = parser.parse_args()
+    
+    # Import torch here (after argument parsing) to avoid UCC library conflicts when showing help
+    # This ensures torch is only imported once for the entire module
+    try:
+        _ensure_torch_imported()
+    except ImportError as e:
+        print(f'Error: Failed to import torch: {e}', file=sys.stderr)
+        print(f'This may be due to library conflicts (e.g., UCC). Please check your environment.', file=sys.stderr)
+        sys.exit(1)
     
     # Parse operations
     operations = [op.strip() for op in args.operations.split(',')]
