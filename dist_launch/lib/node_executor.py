@@ -31,6 +31,17 @@ class NodeExecutor:
         """
         if ssh_key_path is None:
             ssh_key_path = get_project_ssh_key_path()
+        
+        # Ensure SSH key permissions are correct (required by SSH)
+        try:
+            from dist_launch import _fix_ssh_key_permissions
+            if not _fix_ssh_key_permissions(ssh_key_path):
+                import sys
+                print(f'Warning: SSH key permissions may be incorrect for {ssh_key_path}. '
+                      f'SSH may fail. Run: chmod 600 {ssh_key_path}', file=sys.stderr)
+        except Exception:
+            pass  # If we can't fix permissions, let SSH handle the error
+        
         self.ssh_key_path = ssh_key_path
         self.ssh_port = ssh_port
         self.ssh_user = ssh_user

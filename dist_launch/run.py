@@ -194,7 +194,36 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
             # Remote nodes - prepare for async launch
             # Always pass env vars to remote nodes via SSH, because SSH non-interactive shell
             # doesn't automatically inherit environment variables from pytorch-job
-            exec_env = env_vars if env_vars else None
+            # Merge distributed training env vars with important system env vars (PATH, LD_LIBRARY_PATH, etc.)
+            exec_env = {}
+            if use_existing_env:
+                # Include important system environment variables that should be preserved
+                important_env_vars = [
+                    # System paths
+                    'PATH', 'LD_LIBRARY_PATH', 'PYTHONPATH',
+                    # Python/pip related
+                    'PYTHON', 'PIP', 'VIRTUAL_ENV', 'CONDA_DEFAULT_ENV', 'CONDA_PREFIX',
+                    # CUDA related
+                    'CUDA_HOME', 'CUDA_PATH', 'CUDA_ROOT',
+                    # NCCL related
+                    'NCCL_SOCKET_IFNAME', 'NCCL_IB_DISABLE', 'NCCL_DEBUG', 'NCCL_DEBUG_SUBSYS',
+                    # GPU related
+                    'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES',
+                    # Other important vars
+                    'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL',
+                ]
+                for key in important_env_vars:
+                    if key in os.environ:
+                        exec_env[key] = os.environ[key]
+                
+                # Also include any environment variables that start with PYTHON, PIP, or CONDA
+                # to catch any custom Python-related environment variables
+                for key, value in os.environ.items():
+                    if key.startswith(('PYTHON', 'PIP', 'CONDA')) and key not in exec_env:
+                        exec_env[key] = value
+            # Add/override with distributed training env vars
+            if env_vars:
+                exec_env.update(env_vars)
             # Use command_template for remote nodes too
             remote_script_cmd = command_template.format(script=train_script_abs)
             node_commands.append({
@@ -202,7 +231,7 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
                 'local_rank': local_rank,
                 'global_rank': global_rank,
                 'type': 'remote',
-                'env_vars': exec_env,
+                'env_vars': exec_env if exec_env else None,
                 'command': remote_script_cmd,
                 'work_dir': master_work_dir,  # All nodes execute in same directory as master
                 'is_command': is_command,
@@ -404,7 +433,9 @@ def main():
                     # Prepare environment for this process
                     # If use_existing_env is True, use existing env vars from pytorch-job
                     # But always override critical distributed training vars (RANK, WORLD_SIZE, LOCAL_RANK, etc.)
+                    # Important: Preserve all system env vars (PATH, LD_LIBRARY_PATH, PYTHONPATH, etc.)
                     if use_existing_env:
+                        # Copy all existing environment variables to preserve PATH, LD_LIBRARY_PATH, PYTHONPATH, etc.
                         full_env = os.environ.copy()
                         # Critical distributed training env vars that must be overridden
                         critical_vars = ['RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT', 
@@ -414,7 +445,9 @@ def main():
                             if key in critical_vars or key not in full_env:
                                 full_env[key] = value
                     else:
+                        # Start with all existing env vars to preserve system paths
                         full_env = os.environ.copy()
+                        # Update with distributed training env vars
                         full_env.update(env_vars)
                     
                     print(f'  Launching local process (local_rank={local_rank}, global_rank={global_rank})...')
@@ -511,17 +544,21 @@ def main():
                     global_rank = cmd_info.get('global_rank', 0)
                     
                     # Prepare environment
+                    # Important: Preserve all system env vars (PATH, LD_LIBRARY_PATH, PYTHONPATH, etc.)
                     # Critical distributed training env vars that must be overridden
                     critical_vars = ['RANK', 'WORLD_SIZE', 'LOCAL_RANK', 'MASTER_ADDR', 'MASTER_PORT', 
                                     'PET_NODE_RANK', 'PET_MASTER_ADDR', 'PET_MASTER_PORT']
                     if use_existing_env:
+                        # Copy all existing environment variables to preserve PATH, LD_LIBRARY_PATH, PYTHONPATH, etc.
                         full_env = os.environ.copy()
                         for key, value in env_vars.items():
                             # Always override critical vars, even if they exist
                             if key in critical_vars or key not in full_env:
                                 full_env[key] = value
                     else:
+                        # Start with all existing env vars to preserve system paths
                         full_env = os.environ.copy()
+                        # Update with distributed training env vars
                         full_env.update(env_vars)
                     
                     print(f'  Launching local process (local_rank={local_rank}, global_rank={global_rank}) in background...')

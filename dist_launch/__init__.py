@@ -62,26 +62,51 @@ def _fix_ssh_key_permissions(key_path):
     
     Args:
         key_path: Path to SSH private key file
+    
+    Returns:
+        True if permissions are correct or were fixed, False if fix failed
     """
     try:
-        if os.path.exists(key_path):
-            # Get current permissions
-            current_mode = os.stat(key_path).st_mode
-            # Check if permissions are too open (not 600)
-            # 0o600 = rw------- (owner read/write only)
-            if current_mode & 0o077 != 0:  # If group or others have any permissions
-                try:
-                    os.chmod(key_path, 0o600)
-                    # Only log if we actually changed permissions (avoid spam)
-                    if os.stat(key_path).st_mode & 0o077 == 0:
-                        pass  # Success, no need to log
-                except (OSError, PermissionError) as e:
-                    # If we can't fix permissions, SSH will fail with a clear error
-                    # Don't raise exception, let SSH handle it
-                    pass
-    except Exception:
-        # Silently fail - if permissions can't be fixed, SSH will give a clear error
-        pass
+        if not os.path.exists(key_path):
+            return False
+        
+        # Get current permissions
+        current_mode = os.stat(key_path).st_mode
+        # Extract permission bits (last 3 octal digits)
+        # 0o600 = rw------- (owner read/write only)
+        # We want: owner can read/write (0o600), group and others have no permissions
+        desired_mode = 0o600
+        
+        # Check if permissions are correct
+        # Mask to get only permission bits (0o777)
+        current_perms = current_mode & 0o777
+        if current_perms == desired_mode:
+            return True  # Permissions are already correct
+        
+        # Try to fix permissions
+        try:
+            os.chmod(key_path, desired_mode)
+            # Verify the change
+            new_mode = os.stat(key_path).st_mode
+            new_perms = new_mode & 0o777
+            if new_perms == desired_mode:
+                return True
+            else:
+                # Permission change failed - might need root or file is read-only
+                import sys
+                print(f'Warning: Could not set permissions to 600 for {key_path} (current: {oct(new_perms)}). '
+                      f'You may need to run: chmod 600 {key_path}', file=sys.stderr)
+                return False
+        except (OSError, PermissionError) as e:
+            # If we can't fix permissions, print a helpful message
+            import sys
+            print(f'Warning: Could not fix permissions for {key_path}: {e}. '
+                  f'You may need to run: chmod 600 {key_path}', file=sys.stderr)
+            return False
+    except Exception as e:
+        import sys
+        print(f'Warning: Error checking/fixing permissions for {key_path}: {e}', file=sys.stderr)
+        return False
 
 
 def get_project_ssh_public_key_path():
