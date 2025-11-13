@@ -54,12 +54,16 @@ def test_allreduce(size_mb: int, iterations: int, dtype: str = 'float32'):
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
     
+    # Device is already set in main() before init_process_group
+    # Use current_device() to get the actual device (respects CUDA_VISIBLE_DEVICES mapping)
+    device_id = torch.cuda.current_device()
+    device = torch.device(f'cuda:{device_id}')
+    
     # Convert size to elements based on dtype
     bytes_per_element = 4 if dtype in ['float32', 'int32'] else 2  # float16 is 2 bytes
     size_elements = (size_mb * 1024 * 1024) // bytes_per_element
     
     # Create tensor on the correct GPU device
-    device = torch.device(f'cuda:{local_rank}')
     if dtype == 'float32':
         tensor = torch.ones(size_elements, dtype=torch.float32, device=device)
     elif dtype == 'float16':
@@ -72,30 +76,45 @@ def test_allreduce(size_mb: int, iterations: int, dtype: str = 'float32'):
     # Warmup
     for _ in range(3):
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
-    
     torch.cuda.synchronize(device)
     
-    # Actual test
-    start_time = time.time()
-    for i in range(iterations):
-        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    # Actual test - use time.perf_counter() for high-precision timing
+    # NCCL operations are async, must synchronize properly to measure accurately
     torch.cuda.synchronize(device)
-    end_time = time.time()
+    dist.barrier()  # Ensure all processes are ready before timing
+    start_time = time.perf_counter()
+    try:
+        for i in range(iterations):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            # Critical: synchronize CUDA and access tensor to force NCCL completion
+            # Accessing tensor data forces synchronization from GPU to CPU
+            torch.cuda.synchronize(device)
+            _ = tensor[0].item()  # Force synchronization by accessing tensor data
+            dist.barrier()  # Ensure all processes complete the operation
+    except Exception as e:
+        raise RuntimeError(f'Allreduce test failed at iteration {i}: {e}')
+    end_time = time.perf_counter()
     
     elapsed = end_time - start_time
-    avg_time = elapsed / iterations
+    avg_time = elapsed / iterations  # Average time per iteration in seconds
     # Bandwidth calculation: distinguish between algorithm bandwidth and bus bandwidth
-    # Convert MB to GB: divide by 1024
-    size_gb = size_mb / 1024.0
+    # Use actual tensor size in bytes for accurate calculation (matching official nccl-tests)
+    bytes_per_element = 4 if dtype in ['float32', 'int32'] else 2
+    actual_size_bytes = size_elements * bytes_per_element
+    actual_size_gb = actual_size_bytes / (1024.0 ** 3)
     
-    # Algorithm bandwidth: data processed per second (actual data size / time)
-    # This represents the effective bandwidth from the algorithm's perspective
-    algo_bw_gbps = size_gb / avg_time
+    # Algorithm bandwidth: total array size processed per second
+    # For Allreduce: S is the total array size = sendcount * sizeof(datatype) * n
+    # Since size_mb is per rank, total S = size_mb * n
+    # Formula matches NVIDIA official nccl-tests: algbw = S/t
+    # Reference: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+    total_size_gb = actual_size_gb * world_size
+    algo_bw_gbps = total_size_gb / avg_time
     
-    # Bus bandwidth: total data transferred on bus per second
-    # For Allreduce: each node sends and receives data, total bus traffic = size_GB * 2 * (nRanks - 1) / nRanks
-    # Formula matches NVIDIA official nccl-tests: bus_bw = (size_GB * 2 * (nRanks - 1) / nRanks) / time
-    bus_bw_gbps = (size_gb * 2 * (world_size - 1) / world_size) / avg_time
+    # Bus bandwidth: hardware bandwidth measurement
+    # Formula matches NVIDIA official nccl-tests: busbw = algbw * (2 * (n-1) / n)
+    # Reference: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+    bus_bw_gbps = algo_bw_gbps * (2 * (world_size - 1) / world_size)
     
     if rank == 0:
         print(f'Allreduce test: {size_mb}MB, {iterations} iterations, dtype={dtype}')
@@ -123,12 +142,16 @@ def test_allgather(size_mb: int, iterations: int, dtype: str = 'float32'):
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
     
+    # Device is already set in main() before init_process_group
+    # Use current_device() to get the actual device (respects CUDA_VISIBLE_DEVICES mapping)
+    device_id = torch.cuda.current_device()
+    device = torch.device(f'cuda:{device_id}')
+    
     # Convert size to elements based on dtype
     bytes_per_element = 4 if dtype in ['float32', 'int32'] else 2  # float16 is 2 bytes
     size_elements = (size_mb * 1024 * 1024) // bytes_per_element
     
     # Create tensor on the correct GPU device
-    device = torch.device(f'cuda:{local_rank}')
     if dtype == 'float32':
         tensor = torch.ones(size_elements, dtype=torch.float32, device=device)
         output_list = [torch.zeros_like(tensor) for _ in range(world_size)]
@@ -147,29 +170,43 @@ def test_allgather(size_mb: int, iterations: int, dtype: str = 'float32'):
     
     torch.cuda.synchronize(device)
     
-    # Actual test
-    start_time = time.time()
+    # Actual test - use time.perf_counter() for high-precision timing
+    # NCCL operations are async, must synchronize properly to measure accurately
+    torch.cuda.synchronize(device)
+    dist.barrier()  # Ensure all processes are ready before timing
+    start_time = time.perf_counter()
     for i in range(iterations):
         dist.all_gather(output_list, tensor)
-    torch.cuda.synchronize(device)
-    end_time = time.time()
+        # Critical: synchronize CUDA and access tensor to force NCCL completion
+        # Accessing tensor data forces synchronization from GPU to CPU
+        torch.cuda.synchronize(device)
+        _ = output_list[0][0].item()  # Force synchronization by accessing tensor data
+        dist.barrier()  # Ensure all processes complete the operation
+    end_time = time.perf_counter()
     
     elapsed = end_time - start_time
-    avg_time = elapsed / iterations
+    avg_time = elapsed / iterations  # Average time per iteration in seconds
     # Bandwidth calculation: distinguish between algorithm bandwidth and bus bandwidth
-    # Convert MB to GB: divide by 1024
-    size_gb = size_mb / 1024.0
+    # Use actual tensor size in bytes for accurate calculation (matching official nccl-tests)
+    bytes_per_element = 4 if dtype in ['float32', 'int32'] else 2
+    actual_size_bytes = size_elements * bytes_per_element
+    actual_size_gb = actual_size_bytes / (1024.0 ** 3)
     
-    # Algorithm bandwidth: data processed per second (actual data size / time)
-    algo_bw_gbps = size_gb / avg_time
+    # Algorithm bandwidth: total array size processed per second
+    # For Allgather: S is the total array size = sendcount * sizeof(datatype) * n
+    # Since size_mb is per rank, total S = size_mb * n
+    # Formula matches NVIDIA official nccl-tests: algbw = S/t
+    # Reference: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+    total_size_gb = actual_size_gb * world_size
+    algo_bw_gbps = total_size_gb / avg_time
     
-    # Bus bandwidth: total data transferred on bus per second
-    # For Allgather: each node receives data from all other nodes
-    # Formula matches NVIDIA official nccl-tests: bus_bw = (size_GB * (nRanks - 1)) / time
-    bus_bw_gbps = (size_gb * (world_size - 1)) / avg_time
+    # Bus bandwidth: hardware bandwidth measurement
+    # Formula matches NVIDIA official nccl-tests: busbw = algbw * ((n-1)/n)
+    # Reference: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+    bus_bw_gbps = algo_bw_gbps * ((world_size - 1) / world_size)
     
     if rank == 0:
-        print(f'Allgather test: {size_mb}MB, {iterations} iterations, dtype={dtype}')
+        print(f'Allgather test: {size_mb}MB, {iterations} iterations, dtype={dtype}, world_size:{world_size}')
         print(f'  Average time: {avg_time*1000:.2f} ms')
         print(f'  Algorithm bandwidth: {algo_bw_gbps:.2f} GB/s')
         print(f'  Bus bandwidth: {bus_bw_gbps:.2f} GB/s')
@@ -194,12 +231,16 @@ def test_broadcast(size_mb: int, iterations: int, dtype: str = 'float32'):
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get('LOCAL_RANK', '0'))
     
+    # Device is already set in main() before init_process_group
+    # Use current_device() to get the actual device (respects CUDA_VISIBLE_DEVICES mapping)
+    device_id = torch.cuda.current_device()
+    device = torch.device(f'cuda:{device_id}')
+    
     # Convert size to elements based on dtype
     bytes_per_element = 4 if dtype in ['float32', 'int32'] else 2  # float16 is 2 bytes
     size_elements = (size_mb * 1024 * 1024) // bytes_per_element
     
     # Create tensor on the correct GPU device
-    device = torch.device(f'cuda:{local_rank}')
     if dtype == 'float32':
         tensor = torch.ones(size_elements, dtype=torch.float32, device=device)
     elif dtype == 'float16':
@@ -215,15 +256,22 @@ def test_broadcast(size_mb: int, iterations: int, dtype: str = 'float32'):
     
     torch.cuda.synchronize(device)
     
-    # Actual test
-    start_time = time.time()
+    # Actual test - use time.perf_counter() for high-precision timing
+    # NCCL operations are async, must synchronize properly to measure accurately
+    torch.cuda.synchronize(device)
+    dist.barrier()  # Ensure all processes are ready before timing
+    start_time = time.perf_counter()
     for i in range(iterations):
         dist.broadcast(tensor, src=0)
-    torch.cuda.synchronize(device)
-    end_time = time.time()
+        # Critical: synchronize CUDA and access tensor to force NCCL completion
+        # Accessing tensor data forces synchronization from GPU to CPU
+        torch.cuda.synchronize(device)
+        _ = tensor[0].item()  # Force synchronization by accessing tensor data
+        dist.barrier()  # Ensure all processes complete the operation
+    end_time = time.perf_counter()
     
     elapsed = end_time - start_time
-    avg_time = elapsed / iterations
+    avg_time = elapsed / iterations  # Average time per iteration in seconds
     # Bandwidth calculation: distinguish between algorithm bandwidth and bus bandwidth
     # Convert MB to GB: divide by 1024
     size_gb = size_mb / 1024.0
@@ -262,6 +310,15 @@ def run_nccl_tests(operations: List[str], sizes_mb: List[int], iterations: int, 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     
+    # Warn if world_size is 1 (no inter-process communication)
+    if world_size == 1:
+        if rank == 0:
+            print(f'Warning: world_size=1, no inter-process communication will occur.')
+            print(f'         NCCL collective operations require at least 2 processes.')
+            print(f'         Results will show very short times and bus_bw=0 (no bus traffic).')
+            print(f'         For single-node multi-GPU testing, use --nper-node N (N>1) without --world-size.')
+            print()
+    
     if rank == 0:
         print(f'=== NCCL Tests ===')
         print(f'World size: {world_size}')
@@ -273,13 +330,37 @@ def run_nccl_tests(operations: List[str], sizes_mb: List[int], iterations: int, 
         print()
     
     results = {}
+    has_error = False
     
     for op in operations:
+        # Check if process group is still valid before each operation
+        if not dist.is_initialized():
+            if rank == 0:
+                print(f'Error: Process group is not initialized before testing {op}')
+            has_error = True
+            break
+        
+        # Synchronize all processes before starting a new operation
+        try:
+            dist.barrier()
+        except Exception as e:
+            if rank == 0:
+                print(f'Error: Failed to synchronize before testing {op}: {e}')
+            has_error = True
+            break
+        
         if rank == 0:
             print(f'\n--- Testing {op.upper()} ---')
         results[op] = {}
         
         for size_mb in sizes_mb:
+            # Check process group before each size test
+            if not dist.is_initialized():
+                if rank == 0:
+                    print(f'Error: Process group is not initialized before testing {op} with size {size_mb}MB')
+                has_error = True
+                break
+            
             try:
                 if op == 'allreduce':
                     avg_time, algo_bw, bus_bw = test_allreduce(size_mb, iterations, dtype)
@@ -297,11 +378,51 @@ def run_nccl_tests(operations: List[str], sizes_mb: List[int], iterations: int, 
                     'algo_bw_gbps': algo_bw,
                     'bus_bw_gbps': bus_bw
                 }
+                
+                # Synchronize after each size test to ensure all processes complete
+                try:
+                    dist.barrier()
+                except Exception as barrier_e:
+                    if rank == 0:
+                        print(f'Warning: Barrier failed after {op} {size_mb}MB test: {barrier_e}')
+                    has_error = True
+                    break
             except Exception as e:
                 if rank == 0:
                     print(f'Error testing {op} with size {size_mb}MB: {e}')
                 import traceback
-                traceback.print_exc()
+                if rank == 0:
+                    traceback.print_exc()
+                # Try to synchronize even after error to keep processes in sync
+                # But if barrier fails, we need to break to avoid hanging
+                try:
+                    dist.barrier()
+                except Exception as barrier_e:
+                    if rank == 0:
+                        print(f'Error: Barrier failed after error in {op} {size_mb}MB test: {barrier_e}')
+                    has_error = True
+                    break
+        
+        # If we encountered an error in the inner loop, break the outer loop
+        if has_error:
+            break
+        
+        # Synchronize all processes after completing an operation
+        try:
+            dist.barrier()
+        except Exception as e:
+            if rank == 0:
+                print(f'Warning: Failed to synchronize after testing {op}: {e}')
+            has_error = True
+            break
+    
+    # Final synchronization before summary to ensure all processes are still alive
+    if not has_error and dist.is_initialized():
+        try:
+            dist.barrier()
+        except Exception as e:
+            if rank == 0:
+                print(f'Warning: Final barrier failed: {e}')
     
     if rank == 0:
         print(f'\n=== Summary ===')
@@ -386,6 +507,12 @@ Environment variables (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT) are set autom
     master_port = int(os.environ.get('MASTER_PORT', '23456'))
     rank = int(os.environ.get('RANK', '0'))
     
+    # Debug: Print parsed operations and arguments (only on rank 0, but before process group init)
+    if rank == 0:
+        print(f'[DEBUG] Parsed operations: {operations}')
+        print(f'[DEBUG] sys.argv: {sys.argv}')
+        print(f'[DEBUG] args.operations: {args.operations}')
+    
     # Handle nper_node parameter
     # If nper_node is specified, world_size should be num_nodes * nper_node
     # But in this script, world_size is already the total number of processes (including all GPUs)
@@ -410,7 +537,14 @@ Environment variables (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT) are set autom
         sys.exit(1)
     
     # Set CUDA device for this process
+    # This must be done before initializing process group to avoid device mapping warnings
     torch.cuda.set_device(local_rank)
+    
+    # Get actual device ID (after CUDA_VISIBLE_DEVICES mapping)
+    actual_device_id = torch.cuda.current_device()
+    if actual_device_id != local_rank:
+        if rank == 0:
+            print(f'Note: local_rank={local_rank} mapped to actual device {actual_device_id} (CUDA_VISIBLE_DEVICES mapping)')
     
     # Set NCCL environment if not set
     if 'NCCL_SOCKET_IFNAME' not in os.environ:
@@ -433,37 +567,64 @@ Environment variables (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT) are set autom
     if 'NCCL_IB_DISABLE' not in os.environ:
         os.environ['NCCL_IB_DISABLE'] = '1'
     
-    print(f'Initializing PyTorch distributed...')
-    print(f'Master: {master_addr}:{master_port}, World size: {world_size}, Rank: {rank}, Local rank: {local_rank}, GPUs per node: {nper_node}')
-    print(f'Environment check - RANK={os.environ.get("RANK")}, WORLD_SIZE={os.environ.get("WORLD_SIZE")}, LOCAL_RANK={os.environ.get("LOCAL_RANK")}')
-    print(f'Process PID: {os.getpid()}, Parent PID: {os.getppid()}')
-    
+    if rank == 0:
+        print(f'Initializing PyTorch distributed...')
+        print(f'Master: {master_addr}:{master_port}, World size: {world_size}, Rank: {rank}, Local rank: {local_rank}, GPUs per node: {nper_node}')
+        print(f'Environment check - RANK={os.environ.get("RANK")}, WORLD_SIZE={os.environ.get("WORLD_SIZE")}, LOCAL_RANK={os.environ.get("LOCAL_RANK")}')
+        print(f'Process PID: {os.getpid()}, Parent PID: {os.getppid()}')
+
     # Verify rank matches environment variable
     env_rank = int(os.environ.get('RANK', '-1'))
     if env_rank != rank:
         print(f'ERROR: Rank mismatch! env RANK={env_rank}, but calculated rank={rank}')
         sys.exit(1)
-    
+
     # Only rank 0 should bind the port, others should connect
     if rank == 0:
         print(f'Rank 0: Will bind to port {master_port} as master')
-    else:
-        print(f'Rank {rank}: Will connect to master at {master_addr}:{master_port}')
+    # else:
+    #     print(f'Rank {rank}: Will connect to master at {master_addr}:{master_port}')
     
-    dist.init_process_group(
-        backend='nccl',
-        init_method=f'tcp://{master_addr}:{master_port}',
-        world_size=world_size,
-        rank=rank,
-        timeout=torch.distributed.default_pg_timeout
-    )
-    print(f'✓ Process group initialized successfully (rank {rank})')
+    # Initialize process group
+    # Note: device_id parameter may not be available in all PyTorch versions
+    # We've already set the device with torch.cuda.set_device() above
+    # Use actual_device_id to match the device used for tensor creation
+    try:
+        # Try with device_id first (newer PyTorch versions)
+        # device_id must be a torch.device object, not an integer
+        # Use actual_device_id to ensure consistency with tensor creation
+        device = torch.device(f'cuda:{actual_device_id}')
+        dist.init_process_group(
+            backend='nccl',
+            init_method=f'tcp://{master_addr}:{master_port}',
+            world_size=world_size,
+            rank=rank,
+            timeout=torch.distributed.default_pg_timeout,
+            device_id=device
+        )
+    except (TypeError, AttributeError):
+        # Fallback for older PyTorch versions that don't support device_id
+        # or if device_id format is incorrect
+        dist.init_process_group(
+            backend='nccl',
+            init_method=f'tcp://{master_addr}:{master_port}',
+            world_size=world_size,
+            rank=rank,
+            timeout=torch.distributed.default_pg_timeout
+        )
+    # print(f'✓ Process group initialized successfully (rank {rank})')
     
     try:
         # Run tests
         run_nccl_tests(operations, sizes_mb, args.iterations, args.dtype)
     finally:
-        dist.destroy_process_group()
+        # Clean up process group
+        if dist.is_initialized():
+            try:
+                dist.destroy_process_group()
+            except Exception as e:
+                if rank == 0:
+                    print(f'Warning: Failed to destroy process group: {e}')
 
 
 if __name__ == '__main__':

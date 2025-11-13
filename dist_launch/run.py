@@ -172,7 +172,7 @@ def create_cluster(nodes: List[str], master_addr: str, world_size: int) -> Clust
 
 def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_script: str,
                    dry_run: bool = False, wait: bool = False, use_existing_env: bool = True,
-                   nper_node: int = 1, script_args: list = None) -> tuple:
+                   nper_node: int = 1, script_args: list = None, total_world_size: int = None) -> tuple:
     """
     Launch training on all nodes
     
@@ -221,16 +221,29 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
         command_template = '{script}'  # Execute directly, not via bash
         is_command = True
     
+    # Calculate how many processes to actually launch based on total_world_size
+    total_processes_to_launch = len(all_nodes) * nper_node
+    if total_world_size is not None and total_world_size < total_processes_to_launch:
+        total_processes_to_launch = total_world_size
+        print(f'Note: Limiting processes to user-specified world_size={total_world_size}')
+    
     print(f'Launching training on {len(all_nodes)} nodes with {nper_node} GPU(s) per node...')
+    print(f'Total processes: {total_processes_to_launch} (world_size={total_world_size if total_world_size else total_processes_to_launch})')
     print(f'Working directory: {master_work_dir}')
     
     # Prepare all processes (one per GPU per node)
     # This ensures all processes start as simultaneously as possible
     node_commands = []
+    process_count = 0
     for node in all_nodes:
         for local_rank in range(nper_node):
+            # Limit processes if total_world_size is specified
+            if total_world_size is not None and process_count >= total_world_size:
+                break
+            
             # Calculate global rank: node_rank * nper_node + local_rank
             global_rank = node.node_rank * nper_node + local_rank
+            process_count += 1
             
             # Get base env vars for this node
             env_vars = cluster.get_node_env(node, use_existing=use_existing_env)
@@ -239,7 +252,11 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
             # Set LOCAL_RANK
             env_vars['LOCAL_RANK'] = str(local_rank)
             # Update WORLD_SIZE to total number of processes
-            env_vars['WORLD_SIZE'] = str(len(all_nodes) * nper_node)
+            # Use total_world_size if provided (user-specified), otherwise calculate from nodes
+            if total_world_size is not None:
+                env_vars['WORLD_SIZE'] = str(total_world_size)
+            else:
+                env_vars['WORLD_SIZE'] = str(total_processes_to_launch)
             
             env_str = ' '.join([f'{k}="{v}"' for k, v in env_vars.items()]) if env_vars else ''
             # Use command_template to handle both scripts and commands
@@ -318,6 +335,10 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
                 'is_command': is_command,
                 'command_template': command_template
             })
+        
+        # Break outer loop if we've reached the limit
+        if total_world_size is not None and process_count >= total_world_size:
+            break
     
     # Launch all remote nodes asynchronously (non-blocking)
     # This ensures all nodes start as simultaneously as possible for distributed training
@@ -433,18 +454,34 @@ def main():
             nodes.insert(0, current_hostname)
             print(f'Reordered discovered nodes to put current hostname ({current_hostname}) as rank0')
     
-    # Calculate actual world_size: if nper_node > 1, world_size should be num_nodes * nper_node
-    # But if world_size is explicitly set, we treat it as total number of processes
+    # Calculate actual world_size
+    # Priority: 1) If --nper-node is specified, use num_nodes * nper_node
+    #           2) User-specified --world-size
+    #           3) Environment WORLD_SIZE
     num_nodes = len(nodes)
+    
+    # Get environment WORLD_SIZE for comparison
+    env_world_size = os.environ.get('WORLD_SIZE', '')
+    
+    # If nper_node is specified, world_size should be num_nodes * nper_node
+    # This ensures multi-GPU per node works correctly
     if nper_node > 1:
-        # If nper_node is specified, world_size should be num_nodes * nper_node
+        # Calculate from nodes and nper_node
         actual_world_size = num_nodes * nper_node
-        if args.world_size != actual_world_size:
-            print(f'Note: With {num_nodes} nodes and {nper_node} GPUs per node, total processes = {actual_world_size}')
-            print(f'Updating world_size from {args.world_size} to {actual_world_size}')
-            args.world_size = actual_world_size
+        if args.world_size is not None and args.world_size != actual_world_size:
+            print(f'Note: --nper-node={nper_node} specified, calculating world_size from nodes and GPUs per node')
+            print(f'      With {num_nodes} node(s) and {nper_node} GPU(s) per node, total processes = {actual_world_size}')
+            print(f'      Ignoring --world-size={args.world_size}, using calculated world_size={actual_world_size}')
+        elif args.world_size is None:
+            print(f'Note: With {num_nodes} node(s) and {nper_node} GPU(s) per node, total processes = {actual_world_size}')
+        args.world_size = actual_world_size
     else:
-        actual_world_size = args.world_size
+        # No --nper-node specified, use user-specified --world-size or env
+        if args.world_size is not None:
+            actual_world_size = args.world_size
+        else:
+            # Use env WORLD_SIZE or default
+            actual_world_size = args.world_size
     
     # Create cluster (world_size here is number of nodes, not total processes)
     cluster = create_cluster(nodes, args.master_addr, num_nodes)
@@ -485,7 +522,8 @@ def main():
                                                                 dry_run=args.dry_run, wait=args.wait,
                                                                 use_existing_env=use_existing_env,
                                                                 nper_node=nper_node,
-                                                                script_args=script_args)
+                                                                script_args=script_args,
+                                                                total_world_size=actual_world_size)
     
     # Launch all local processes (rank0 node with potentially multiple GPUs)
     if not args.dry_run:
@@ -744,4 +782,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 

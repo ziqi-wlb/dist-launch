@@ -681,17 +681,17 @@ def discover_and_save_hostnames():
             rank=rank,
             timeout=init_timeout
         )
-        print(f'✓ Process group initialized successfully')
+        # print(f'✓ Process group initialized successfully')
         
         world_size = dist.get_world_size()
         rank = dist.get_rank()
-        print(f'Confirmed: world_size={world_size}, rank={rank}')
+        # print(f'Confirmed: world_size={world_size}, rank={rank}')
         
         # Get current hostname and IP address
         current_hostname = os.environ.get('HOSTNAME', '')
         if not current_hostname:
             current_hostname = socket.gethostname()
-        print(f'Current hostname: {current_hostname}')
+        # print(f'Current hostname: {current_hostname}')
         
         # Get current node's IP address (no DNS resolution)
         # Method: Get IP from network interfaces by connecting to external address
@@ -889,7 +889,7 @@ def main():
             LogWriter.close_log_file()
             sys.exit(0)
         else:
-            print(f'Cluster initialization completed (rank > 0)')
+            # print(f'Cluster initialization completed (rank > 0)')
             # Close log file handle
             LogWriter.close_log_file()
             sys.exit(0)  # Other ranks also exit successfully
