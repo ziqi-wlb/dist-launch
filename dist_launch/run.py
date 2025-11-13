@@ -8,6 +8,7 @@ import argparse
 import time
 import subprocess
 import json
+import signal
 from typing import List, Optional
 
 # Add lib directory to path
@@ -24,6 +25,69 @@ sys.path.insert(0, lib_path)
 from cluster_manager import ClusterManager, NodeConfig
 from node_executor import NodeExecutor
 from host_discovery import HostDiscovery
+
+
+# Global variables for signal handling
+_local_processes = []
+_remote_processes = []
+_interrupted = False
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGINT (Ctrl+C) to gracefully terminate all processes"""
+    global _interrupted
+    if _interrupted:
+        # Second interrupt - force exit
+        print('\n\nForce terminating...', file=sys.stderr)
+        sys.exit(1)
+    
+    _interrupted = True
+    print('\n\nInterrupted by user (Ctrl+C). Cleaning up processes...', file=sys.stderr)
+    sys.stderr.flush()  # Ensure message is printed immediately
+    
+    # Terminate all local processes
+    for cmd_info, local_process in _local_processes:
+        try:
+            if local_process.poll() is None:  # Process is still running
+                local_rank = cmd_info.get('local_rank', 0)
+                global_rank = cmd_info.get('global_rank', 0)
+                print(f'  Terminating local process (local_rank={local_rank}, global_rank={global_rank}, PID={local_process.pid})...', file=sys.stderr)
+                local_process.terminate()
+        except Exception as e:
+            print(f'  Error terminating local process: {e}', file=sys.stderr)
+    
+    # Terminate all remote processes
+    for node, process in _remote_processes:
+        try:
+            if process.poll() is None:  # Process is still running
+                print(f'  Terminating remote process on {node.name} (PID={process.pid})...', file=sys.stderr)
+                process.terminate()
+        except Exception as e:
+            print(f'  Error terminating remote process on {node.name}: {e}', file=sys.stderr)
+    
+    # Wait a bit for graceful termination
+    time.sleep(1)
+    
+    # Force kill if still running
+    for cmd_info, local_process in _local_processes:
+        try:
+            if local_process.poll() is None:
+                local_process.kill()
+        except Exception:
+            pass
+    
+    for node, process in _remote_processes:
+        try:
+            if process.poll() is None:
+                process.kill()
+        except Exception:
+            pass
+    
+    print('All processes terminated.', file=sys.stderr)
+    sys.stderr.flush()  # Ensure message is printed before exit
+    # Restore default signal handler to avoid recursion
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    sys.exit(130)  # Standard exit code for SIGINT
 
 
 def parse_args():
@@ -484,8 +548,12 @@ def main():
                         )
                     else:
                         # For scripts, use bash
+                        # Build command: bash script.sh [args...]
+                        bash_cmd = ['bash', train_script_abs]
+                        if script_args:
+                            bash_cmd.extend(script_args)
                         local_process = subprocess.Popen(
-                            ['bash', train_script_abs],
+                            bash_cmd,
                             env=full_env,
                             cwd=work_dir
                         )
@@ -514,39 +582,68 @@ def main():
                 except Exception as e:
                     print(f'Warning: Could not save process info: {e}', file=sys.stderr)
                 
+                # Set up signal handler for graceful termination
+                global _local_processes, _remote_processes, _interrupted
+                _local_processes = local_processes
+                _remote_processes = processes
+                _interrupted = False
+                signal.signal(signal.SIGINT, _signal_handler)
+                
                 # Wait for all processes to complete
                 print('\nWaiting for all processes to complete...')
+                print('Press Ctrl+C to interrupt and terminate all processes.')
                 
                 # Wait for all local processes
                 all_local_success = True
                 for cmd_info, local_process in local_processes:
+                    if _interrupted:
+                        break
                     local_rank = cmd_info.get('local_rank', 0)
                     global_rank = cmd_info.get('global_rank', 0)
-                    local_process.wait()
-                    if local_process.returncode == 0:
-                        print(f'  ✓ Local process (local_rank={local_rank}, global_rank={global_rank}) completed successfully')
-                    else:
-                        print(f'  ✗ Local process (local_rank={local_rank}, global_rank={global_rank}) failed with return code {local_process.returncode}')
-                        all_local_success = False
+                    try:
+                        local_process.wait()
+                        if local_process.returncode == 0:
+                            pass
+                            # print(f'  ✓ Local process (local_rank={local_rank}, global_rank={global_rank}) completed successfully')
+                        else:
+                            if not _interrupted:
+                                print(f'  ✗ Local process (local_rank={local_rank}, global_rank={global_rank}) failed with return code {local_process.returncode}')
+                            all_local_success = False
+                    except KeyboardInterrupt:
+                        _interrupted = True
+                        break
                 
                 # Wait for all remote processes
                 all_remote_success = True
-                for node, process in processes:
-                    try:
-                        # Calculate local_rank and global_rank for remote processes
-                        node_rank = node.node_rank
-                        local_rank = (node.rank % nper_node) if nper_node > 1 else 0
-                        global_rank = node.rank
-                        print(f'\nWaiting for {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) to complete...')
-                        process.wait()
-                        if process.returncode == 0:
-                            print(f'  ✓ {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) completed successfully')
-                        else:
-                            print(f'  ✗ {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) failed with return code {process.returncode}')
+                if not _interrupted:
+                    for node, process in processes:
+                        if _interrupted:
+                            break
+                        try:
+                            # Calculate local_rank and global_rank for remote processes
+                            node_rank = node.node_rank
+                            local_rank = (node.rank % nper_node) if nper_node > 1 else 0
+                            global_rank = node.rank
+                            # print(f'\nWaiting for {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) to complete...')
+                            process.wait()
+                            if process.returncode == 0:
+                                # print(f'  ✓ {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) completed successfully')
+                                pass
+                            else:
+                                if not _interrupted:
+                                    print(f'  ✗ {node.name} (node_rank {node_rank}, local_rank {local_rank}, global_rank {global_rank}) failed with return code {process.returncode}')
+                                all_remote_success = False
+                        except KeyboardInterrupt:
+                            _interrupted = True
+                            break
+                        except Exception as e:
+                            if not _interrupted:
+                                print(f'  ✗ {node.name} (rank {node.rank}) error: {e}')
                             all_remote_success = False
-                    except Exception as e:
-                        print(f'  ✗ {node.name} (rank {node.rank}) error: {e}')
-                        all_remote_success = False
+                
+                if _interrupted:
+                    # Signal handler will exit, but just in case
+                    sys.exit(130)
                 
                 if all_local_success and all_remote_success:
                     print('\n✓ All processes completed successfully')
