@@ -75,20 +75,39 @@ class NodeExecutor:
                         if not line or line.startswith('#'):
                             continue
                         
-                        # Parse line: IP hostname1 hostname2 ...
+                        # Parse line: IP hostname1 hostname2 ... # comment
                         parts = line.split()
                         if len(parts) < 2:
                             continue
                         
                         ip = parts[0]
+                        # Validate IP format
+                        if not re.match(ip_pattern, ip):
+                            continue
+                        
                         # Check if hostname matches any of the hostnames in this line
+                        found_hostname = False
                         for part in parts[1:]:
                             # Skip comments
                             if part.startswith('#'):
                                 break
                             if part == hostname:
-                                # Validate IP format
-                                if re.match(ip_pattern, ip):
+                                found_hostname = True
+                                break
+                        
+                        if found_hostname:
+                            return ip
+                        
+                        # Also check if hostname is mentioned in the comment
+                        # Format: # dist-launch: rankX -> hostname
+                        if '#' in line:
+                            comment = line.split('#', 1)[1].strip()
+                            # Look for pattern like "rank0 -> hostname" or "rank1 -> hostname"
+                            if '->' in comment and hostname in comment:
+                                # Extract the part after "->"
+                                after_arrow = comment.split('->', 1)[1].strip()
+                                # Check if hostname matches
+                                if hostname in after_arrow.split():
                                     return ip
             except Exception:
                 pass  # If reading /etc/hosts fails, fall back to DNS
