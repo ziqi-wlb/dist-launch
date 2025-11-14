@@ -316,16 +316,18 @@ def update_hosts_file(hostnames, hostname_to_ip=None):
         return False
 
 
-def update_ssh_config(hostnames, ssh_key_path, ssh_port=2025, ssh_user='root'):
+def update_ssh_config(hostnames, ssh_key_path, ssh_port=2025, ssh_user='root', hostname_to_ip=None):
     """
     Update ~/.ssh/config file on rank0 to add SSH configuration for rank-0, rank-1, etc.
     This allows passwordless login via ssh rank-0 without specifying -i key
+    Uses IP addresses as HostName (unified IP form)
     
     Args:
-        hostnames: List of hostnames, ordered by rank
+        hostnames: List of hostnames or IPs, ordered by rank
         ssh_key_path: Path to SSH private key
         ssh_port: SSH port (default 2025)
         ssh_user: SSH username (default root)
+        hostname_to_ip: Dictionary mapping hostname to IP (optional, if hostnames are already IPs, this can be None)
     
     Returns:
         True if successful
@@ -390,8 +392,23 @@ def update_ssh_config(hostnames, ssh_key_path, ssh_port=2025, ssh_user='root'):
         
         for rank, hostname in enumerate(hostnames):
             rank_alias = f'rank-{rank}'
+            # Use IP address as HostName (unified IP form)
+            # If hostname is already an IP, use it directly; otherwise get IP from hostname_to_ip
+            import re
+            ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+            if re.match(ip_pattern, hostname):
+                # hostname is already an IP address
+                hostname_ip = hostname
+            elif hostname_to_ip and hostname in hostname_to_ip:
+                # Get IP from mapping
+                hostname_ip = hostname_to_ip[hostname]
+            else:
+                # Fallback: use hostname (should not happen if /etc/hosts is properly configured)
+                hostname_ip = hostname
+                print(f'Warning: Could not determine IP for {hostname}, using hostname as fallback', file=sys.stderr)
+            
             config_entries.append(f'\nHost {rank_alias}')
-            config_entries.append(f'    HostName {hostname}')
+            config_entries.append(f'    HostName {hostname_ip}')
             config_entries.append(f'    User {ssh_user}')
             config_entries.append(f'    Port {ssh_port}')
             config_entries.append(f'    IdentityFile {ssh_key_path}')
@@ -836,7 +853,7 @@ def discover_and_save_hostnames():
             ssh_port = int(os.environ.get('SSH_PORT', '2025'))
             ssh_user = os.environ.get('SSH_USER', 'root')
             print(f'Updating SSH config with key: {ssh_key_path}, port: {ssh_port}, user: {ssh_user}')
-            update_ssh_config(hostnames, ssh_key_path, ssh_port, ssh_user)
+            update_ssh_config(hostnames, ssh_key_path, ssh_port, ssh_user, hostname_to_ip)
             
             dist.barrier()
             return hostnames
