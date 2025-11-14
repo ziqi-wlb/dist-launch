@@ -46,13 +46,69 @@ class NodeExecutor:
         self.ssh_port = ssh_port
         self.ssh_user = ssh_user
         
+    def _resolve_hostname(self, hostname: str) -> str:
+        """
+        Resolve hostname to IP address via DNS or /etc/hosts
+        
+        Args:
+            hostname: Hostname or IP address
+            
+        Returns:
+            IP address if hostname, or original string if already IP or resolution fails
+        """
+        import socket
+        import re
+        import os
+        
+        # Check if already an IP address
+        ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+        if re.match(ip_pattern, hostname):
+            return hostname  # Already an IP, return as-is
+        
+        # First, try to resolve from /etc/hosts file
+        hosts_file = '/etc/hosts'
+        if os.path.exists(hosts_file):
+            try:
+                with open(hosts_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        
+                        # Parse line: IP hostname1 hostname2 ...
+                        parts = line.split()
+                        if len(parts) < 2:
+                            continue
+                        
+                        ip = parts[0]
+                        # Check if hostname matches any of the hostnames in this line
+                        for part in parts[1:]:
+                            # Skip comments
+                            if part.startswith('#'):
+                                break
+                            if part == hostname:
+                                # Validate IP format
+                                if re.match(ip_pattern, ip):
+                                    return ip
+            except Exception:
+                pass  # If reading /etc/hosts fails, fall back to DNS
+        
+        # Try DNS resolution
+        try:
+            ip = socket.gethostbyname(hostname)
+            return ip
+        except (socket.gaierror, socket.herror, OSError):
+            # DNS resolution failed, return original hostname
+            # SSH will try to resolve it
+            return hostname
+    
     def _build_ssh_command(self, hostname: str, command: str, env_vars: Optional[Dict[str, str]] = None,
                           work_dir: Optional[str] = None) -> List[str]:
         """
         Build SSH command
         
         Args:
-            hostname: Target hostname
+            hostname: Target hostname (will be resolved to IP via DNS)
             command: Command to execute
             env_vars: Environment variables to set
             work_dir: Working directory to cd into before executing command
@@ -60,6 +116,9 @@ class NodeExecutor:
         Returns:
             SSH command as list of arguments
         """
+        # Resolve hostname to IP address via DNS
+        resolved_hostname = self._resolve_hostname(hostname)
+        
         ssh_cmd = [
             'ssh',
             '-i', self.ssh_key_path,
@@ -67,7 +126,7 @@ class NodeExecutor:
             '-o', 'StrictHostKeyChecking=no',
             '-o', 'UserKnownHostsFile=/dev/null',
             '-o', 'LogLevel=ERROR',
-            f'{self.ssh_user}@{hostname}',
+            f'{self.ssh_user}@{resolved_hostname}',
         ]
         
         # Debug: Log the SSH command (without password-sensitive info)

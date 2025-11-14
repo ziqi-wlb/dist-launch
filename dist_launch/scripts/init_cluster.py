@@ -828,12 +828,13 @@ def discover_and_save_hostnames():
 
         # Only rank 0 saves the result
         if rank == 0:
-            # Save to file (use training master_port, not init port)
+            # Save hostnames (keep original hostnames, not IPs)
+            # DNS resolution will be done when connecting
             cluster_info = {
                 'master_addr': master_addr,
                 'master_port': training_master_port,  # Save training port, not init port
                 'world_size': world_size,
-                'hostnames': hostnames
+                'hostnames': hostnames  # Save hostnames (DNS resolution will be done when connecting)
             }
             
             # Save to shared location (assume all nodes can access)
