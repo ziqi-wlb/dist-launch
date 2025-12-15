@@ -254,6 +254,31 @@ def cmd_nccl_tests(args):
     cmd = ['python3', run_py, nccl_tests_sh] + args
     os.execvp('python3', cmd)
 
+def cmd_fix_ssh_key(args):
+    """Fix SSH key permissions"""
+    try:
+        from dist_launch import get_project_ssh_key_path, _fix_ssh_key_permissions
+        
+        key_path = get_project_ssh_key_path()
+        print(f'Checking SSH key permissions: {key_path}')
+        
+        if not os.path.exists(key_path):
+            print(f'Error: SSH key not found at {key_path}')
+            sys.exit(1)
+        
+        if _fix_ssh_key_permissions(key_path):
+            print(f'✓ SSH key permissions are correct (600)')
+            sys.exit(0)
+        else:
+            print(f'✗ Failed to fix SSH key permissions')
+            print(f'Please run manually: sudo chmod 600 {key_path}')
+            sys.exit(1)
+    except Exception as e:
+        print(f'Error: {e}')
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
 def main():
     """Main entry point"""
     if len(sys.argv) < 2 or sys.argv[1] in ['-h', '--help', 'help']:
@@ -330,6 +355,14 @@ def main():
         print('            "dist-launch run nccl_tests.sh". Environment variables')
         print('            (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT) are set automatically.')
         print()
+        print('  fix-ssh-key')
+        print('      Fix SSH private key file permissions to 600 (required by SSH)')
+        print('      This command checks and fixes permissions for the SSH key used by dist-launch.')
+        print('      Run this if you see "Permissions too open" errors when using SSH.')
+        print()
+        print('      Examples:')
+        print('        dist-launch fix-ssh-key')
+        print()
         print('For more information, see README.md')
         sys.exit(0 if sys.argv[1] in ['-h', '--help', 'help'] else 1)
     
@@ -344,9 +377,11 @@ def main():
         cmd_kill(args)
     elif command == 'nccl-tests':
         cmd_nccl_tests(args)
+    elif command == 'fix-ssh-key':
+        cmd_fix_ssh_key(args)
     else:
         print(f'Error: Unknown command: {command}')
-        print('Available commands: wait, run, kill, nccl-tests')
+        print('Available commands: wait, run, kill, nccl-tests, fix-ssh-key')
         sys.exit(1)
 
 if __name__ == '__main__':

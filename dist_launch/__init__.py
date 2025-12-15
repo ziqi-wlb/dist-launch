@@ -49,11 +49,11 @@ def get_project_ssh_key_path():
         _fix_ssh_key_permissions(project_ssh_key)
         return project_ssh_key
     
-    # Fallback to default location
-    default_path = '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa'
-    if os.path.exists(default_path):
-        _fix_ssh_key_permissions(default_path)
-    return default_path
+    # No SSH key found
+    raise FileNotFoundError(
+        f'SSH private key not found. Please set SSH_KEY environment variable or '
+        f'place the key at one of: {package_ssh_key}, {project_ssh_key}'
+    )
 
 
 def _fix_ssh_key_permissions(key_path):
@@ -141,7 +141,9 @@ def get_project_ssh_public_key_path():
     if os.path.exists(project_ssh_public_key):
         return project_ssh_public_key
     
-    # Fallback to default location
-    default_path = '/mnt/3fs/dots-pretrain/weishi/release/public/ssh-key/id_rsa.pub'
-    return default_path
+    # No SSH public key found
+    raise FileNotFoundError(
+        f'SSH public key not found. Please set SSH_PUBLIC_KEY environment variable or '
+        f'place the key at one of: {package_ssh_public_key}, {project_ssh_public_key}'
+    )
 

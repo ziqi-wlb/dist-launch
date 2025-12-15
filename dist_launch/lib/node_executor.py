@@ -135,6 +135,23 @@ class NodeExecutor:
         Returns:
             SSH command as list of arguments
         """
+        # Ensure SSH key permissions are correct before building command
+        # This is critical - SSH will refuse to use keys with incorrect permissions
+        try:
+            from dist_launch import _fix_ssh_key_permissions
+            if not _fix_ssh_key_permissions(self.ssh_key_path):
+                import sys
+                raise RuntimeError(
+                    f'SSH key permissions are incorrect for {self.ssh_key_path}. '
+                    f'SSH requires 600 permissions. Please run: chmod 600 {self.ssh_key_path}'
+                )
+        except RuntimeError:
+            raise  # Re-raise RuntimeError about permissions
+        except Exception as e:
+            # If we can't check/fix permissions, warn but continue
+            import sys
+            print(f'Warning: Could not verify SSH key permissions: {e}', file=sys.stderr)
+        
         # Resolve hostname to IP address via DNS
         resolved_hostname = self._resolve_hostname(hostname)
         

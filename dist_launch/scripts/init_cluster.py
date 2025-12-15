@@ -791,6 +791,7 @@ def discover_and_save_hostnames():
         # Distribute SSH public key to all nodes
         # Use project SSH key path (handles env vars and project directory)
         ssh_public_key = get_project_ssh_public_key_path()
+        ssh_key = os.environ.get('SSH_KEY', '')  # Get SSH_KEY env var for error messages
         
         print(f'Distributing SSH public key from {ssh_public_key}...')
         print(f'Public key file exists: {os.path.exists(ssh_public_key)}')
@@ -802,8 +803,8 @@ def discover_and_save_hostnames():
             print(f'Warning: SSH public key file not found at {ssh_public_key}')
             if ssh_key:
                 print(f'SSH_KEY was set to: {ssh_key}')
-            if ssh_public_key != ssh_key + '.pub':
-                print(f'Trying alternative: {ssh_key}.pub' if ssh_key else 'No SSH_KEY set')
+            if ssh_key and ssh_public_key != ssh_key + '.pub':
+                print(f'Trying alternative: {ssh_key}.pub')
         
         print(f'Calling distribute_ssh_key...')
         success = distribute_ssh_key(hostnames, ssh_public_key)
@@ -850,6 +851,15 @@ def discover_and_save_hostnames():
             # Update SSH config for easy login without specifying key
             # Use project SSH key path (handles env vars and project directory)
             ssh_key_path = get_project_ssh_key_path()
+            
+            # Fix SSH key permissions BEFORE updating SSH config
+            # This ensures direct SSH usage (ssh rank-1) works without permission errors
+            from dist_launch import _fix_ssh_key_permissions
+            if _fix_ssh_key_permissions(ssh_key_path):
+                print(f'✓ SSH key permissions are correct: {ssh_key_path}')
+            else:
+                print(f'⚠ Warning: Could not fix SSH key permissions for {ssh_key_path}', file=sys.stderr)
+                print(f'  Direct SSH usage (ssh rank-1) may fail. Run: dist-launch fix-ssh-key', file=sys.stderr)
             
             ssh_port = int(os.environ.get('SSH_PORT', '2025'))
             ssh_user = os.environ.get('SSH_USER', 'root')
