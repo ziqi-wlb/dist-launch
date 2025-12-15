@@ -289,34 +289,12 @@ def launch_training(cluster: ClusterManager, executor: NodeExecutor, train_scrip
             # Remote nodes - prepare for async launch
             # Always pass env vars to remote nodes via SSH, because SSH non-interactive shell
             # doesn't automatically inherit environment variables from pytorch-job
-            # Merge distributed training env vars with important system env vars (PATH, LD_LIBRARY_PATH, etc.)
+            # First, copy all environment variables from master0 (current execution node)
             exec_env = {}
             if use_existing_env:
-                # Include important system environment variables that should be preserved
-                important_env_vars = [
-                    # System paths
-                    'PATH', 'LD_LIBRARY_PATH', 'PYTHONPATH',
-                    # Python/pip related
-                    'PYTHON', 'PIP', 'VIRTUAL_ENV', 'CONDA_DEFAULT_ENV', 'CONDA_PREFIX',
-                    # CUDA related
-                    'CUDA_HOME', 'CUDA_PATH', 'CUDA_ROOT',
-                    # NCCL related
-                    'NCCL_SOCKET_IFNAME', 'NCCL_IB_DISABLE', 'NCCL_DEBUG', 'NCCL_DEBUG_SUBSYS',
-                    # GPU related
-                    'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES',
-                    # Other important vars
-                    'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL',
-                ]
-                for key in important_env_vars:
-                    if key in os.environ:
-                        exec_env[key] = os.environ[key]
-                
-                # Also include any environment variables that start with PYTHON, PIP, or CONDA
-                # to catch any custom Python-related environment variables
-                for key, value in os.environ.items():
-                    if key.startswith(('PYTHON', 'PIP', 'CONDA')) and key not in exec_env:
-                        exec_env[key] = value
-            # Add/override with distributed training env vars
+                # Copy all environment variables from master0
+                exec_env = os.environ.copy()
+            # Then override with distributed training env vars (RANK, LOCAL_RANK, WORLD_SIZE, etc.)
             if env_vars:
                 exec_env.update(env_vars)
             # Use command_template for remote nodes too
@@ -576,22 +554,43 @@ def main():
                     # Use command_template to handle both scripts and commands
                     is_cmd = cmd_info.get('is_command', False)
                     work_dir = cmd_info.get('work_dir', master_work_dir)
+                    
+                    # Set ulimit to increase file descriptor limit (prevent "Too many open files" error)
+                    # For local processes, we need to set ulimit before launching the command
+                    try:
+                        import resource
+                        # Get current soft limit
+                        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+                        # Set new soft limit (up to hard limit, max 65536)
+                        new_soft = min(65536, hard)
+                        if new_soft > soft:
+                            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+                    except Exception:
+                        # If setting ulimit fails, continue anyway
+                        pass
+                    
                     if is_cmd:
                         # For commands, use shell=True and execute directly
+                        # Prepend ulimit command to ensure file descriptor limit is set
+                        cmd_with_ulimit = f'ulimit -n 65536 2>/dev/null || true; {train_script_abs}'
                         local_process = subprocess.Popen(
-                            train_script_abs,
+                            cmd_with_ulimit,
                             env=full_env,
                             shell=True,
                             cwd=work_dir
                         )
                     else:
                         # For scripts, use bash
-                        # Build command: bash script.sh [args...]
-                        bash_cmd = ['bash', train_script_abs]
+                        # Build command: bash -c "ulimit -n 65536; bash script.sh [args...]"
+                        import shlex
+                        script_parts = [train_script_abs]
                         if script_args:
-                            bash_cmd.extend(script_args)
+                            script_parts.extend(script_args)
+                        # Escape script path and args for shell
+                        script_str = ' '.join([shlex.quote(arg) for arg in script_parts])
+                        bash_cmd_str = f'ulimit -n 65536 2>/dev/null || true; bash {script_str}'
                         local_process = subprocess.Popen(
-                            bash_cmd,
+                            ['bash', '-c', bash_cmd_str],
                             env=full_env,
                             cwd=work_dir
                         )

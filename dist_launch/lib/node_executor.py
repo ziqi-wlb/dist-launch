@@ -152,17 +152,53 @@ class NodeExecutor:
         # This helps verify the port is being used correctly
         
         # Build command with optional cd and env vars
+        # Filter out problematic environment variables that may cause issues
+        # Long variables like LS_COLORS may cause problems when exported via SSH
+        filtered_env_vars = {}
+        if env_vars:
+            skip_vars = {'LS_COLORS', 'LESSCLOSE', 'LESSOPEN'}  # Skip long/display-related vars
+            for k, v in env_vars.items():
+                if k not in skip_vars:
+                    filtered_env_vars[k] = v
+        
+        # Build command parts
         parts = []
+        
+        # Set ulimit to increase file descriptor limit (prevent "Too many open files" error)
+        # This must be done before the command executes
+        parts.append('ulimit -n 65536 2>/dev/null || true')  # Ignore errors if ulimit fails
+        
         if work_dir:
             parts.append(f'cd {work_dir}')
-        if env_vars:
-            # Export environment variables so they are available in the script
-            export_cmds = ' && '.join([f'export {k}="{v}"' for k, v in env_vars.items()])
-            parts.append(export_cmds)
+        
+        # Build the final command with environment variables
+        # Use export to set variables in the shell, then execute the command
+        # This ensures all environment variables are available to the command
+        if filtered_env_vars:
+            # Build export commands for all variables
+            # Escape values properly for shell execution
+            export_cmds = []
+            for k, v in filtered_env_vars.items():
+                # Escape special characters for shell: ' " $ ` \ and newlines
+                # We'll use single quotes for values, escaping single quotes as '\''
+                escaped_v = str(v).replace("'", "'\\''")
+                export_cmds.append(f"export {k}='{escaped_v}'")
+            # Add export commands to parts before the actual command
+            parts.extend(export_cmds)
+        
+        # Add the actual command
         parts.append(command)
         
-        full_command = ' && '.join(parts) if len(parts) > 1 else parts[0]
-        ssh_cmd.append(full_command)
+        # Combine all parts: ulimit, cd, export vars, and the final command
+        full_command = ' && '.join(parts)
+        
+        # Wrap in bash --noprofile --norc to avoid shell initialization scripts
+        # This prevents .bashrc, .profile, etc. from executing and opening files
+        # Escape single quotes in full_command by replacing ' with '\''
+        # This is the standard way to include single quotes in a single-quoted string
+        escaped_command = full_command.replace("'", "'\\''")
+        bash_wrapped = f"bash --noprofile --norc -c '{escaped_command}'"
+        ssh_cmd.append(bash_wrapped)
         return ssh_cmd
     
     def execute(self, node: NodeConfig, command: str, env_vars: Optional[Dict[str, str]] = None,
