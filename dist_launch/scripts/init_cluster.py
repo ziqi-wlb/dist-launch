@@ -465,11 +465,8 @@ def distribute_ssh_key(hostnames, public_key_path):
             print(f'Warning: SSH public key is empty', file=sys.stderr)
             return False
         
-        # Get current hostname
-        current_hostname = os.environ.get('HOSTNAME', '')
-        if not current_hostname:
-            import socket
-            current_hostname = socket.gethostname()
+        # Get current hostname (use actual hostname, not env var)
+        current_hostname = get_actual_hostname()
         
         # Add public key to authorized_keys on current node
         ssh_dir = os.path.expanduser('~/.ssh')
@@ -567,6 +564,96 @@ def distribute_ssh_key(hostnames, public_key_path):
         return False
 
 
+def get_actual_hostname():
+    """Get actual hostname using hostname command or socket.gethostname()"""
+    try:
+        result = subprocess.run(['hostname'], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return socket.gethostname()
+
+
+def get_node_ip(hostname):
+    """Get node IP address, avoiding DNS resolution when possible"""
+    # Try socket connection method first (no DNS)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2.0)
+        try:
+            s.connect(('8.8.8.8', 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        pass
+    
+    # Fallback: try hostname resolution
+    try:
+        return socket.gethostbyname(hostname)
+    except (socket.gaierror, socket.herror):
+        # Check if hostname is already an IP
+        import re
+        if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', hostname):
+            return hostname
+        return hostname  # Use hostname as fallback
+
+
+def create_string_tensors(data_bytes, max_len, world_size, use_cuda):
+    """Create tensors for all_gather from byte data"""
+    padded = data_bytes[:max_len].ljust(max_len, b'\0')
+    if use_cuda:
+        local_tensor = torch.ByteTensor(list(padded)).cuda()
+        gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+    else:
+        local_tensor = torch.ByteTensor(list(padded))
+        gathered_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+    return local_tensor, gathered_tensors
+
+
+def extract_strings_from_tensors(gathered_tensors, use_cuda):
+    """Extract strings from gathered tensors"""
+    results = []
+    for tensor in gathered_tensors:
+        data_bytes = bytes(tensor.cpu().tolist() if use_cuda else tensor.tolist()).rstrip(b'\0')
+        results.append(data_bytes.decode('utf-8', errors='ignore'))
+    return results
+
+
+def sync_env_vars_from_rank0(rank, world_size, use_cuda):
+    """Sync all environment variables from rank0 to all ranks using all_gather"""
+    # Exclude node-specific environment variables that should not be synced
+    excluded_vars = {
+        'HOSTNAME', 'RANK', 'LOCAL_RANK', 'WORLD_SIZE', 'MASTER_ADDR', 'MASTER_PORT',
+        'INIT_MASTER_PORT', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES',
+        'SLURM_PROCID', 'SLURM_LOCALID', 'SLURM_NODEID', 'SLURM_JOB_ID',
+        'OMPI_COMM_WORLD_RANK', 'OMPI_COMM_WORLD_LOCAL_RANK', 'OMPI_COMM_WORLD_SIZE',
+        'PMI_RANK', 'PMI_LOCAL_RANK', 'PMI_SIZE'
+    }
+    
+    if rank == 0:
+        # Collect all environment variables except excluded ones
+        env_dict = {k: v for k, v in os.environ.items() if k not in excluded_vars}
+        env_json = json.dumps(env_dict)
+        print(f'[rank0] Collected {len(env_dict)} environment variables to sync (excluded {len(excluded_vars)} node-specific vars)')
+    else:
+        env_json = '{}'
+    
+    max_env_len = 32768  # Increase buffer size for all env vars
+    env_bytes = env_json.encode('utf-8')[:max_env_len].ljust(max_env_len, b'\0')
+    local_env_tensor, gathered_env_tensors = create_string_tensors(env_bytes, max_env_len, world_size, use_cuda)
+    dist.all_gather(gathered_env_tensors, local_env_tensor)
+    
+    if rank != 0:
+        rank0_env_json = extract_strings_from_tensors(gathered_env_tensors, use_cuda)[0]
+        if rank0_env_json:
+            rank0_env_dict = json.loads(rank0_env_json)
+            for var, value in rank0_env_dict.items():
+                os.environ[var] = value
+            print(f'[rank{rank}] ✓ Synced {len(rank0_env_dict)} environment variables from rank0')
+
+
 def restart_ssh_service(ssh_port=2025):
     """
     Restart SSH service to apply configuration changes
@@ -638,6 +725,36 @@ def restart_ssh_service(ssh_port=2025):
         return False
 
 
+def init_distributed_process_group():
+    """Initialize PyTorch distributed process group"""
+    master_addr = os.environ.get('MASTER_ADDR', 'localhost')
+    training_master_port = int(os.environ.get('MASTER_PORT', '23456'))
+    init_master_port = int(os.environ.get('INIT_MASTER_PORT', str(training_master_port + 1)))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    rank = int(os.environ.get('RANK', 0))
+    
+    backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+    init_timeout = torch.distributed.default_pg_timeout
+    if init_timeout.total_seconds() < 1800:
+        from datetime import timedelta
+        init_timeout = timedelta(seconds=1800)
+    
+    print(f'Initializing PyTorch distributed: backend={backend}, master={master_addr}:{init_master_port}, '
+          f'world_size={world_size}, rank={rank}, timeout={init_timeout.total_seconds()}s')
+    dist.init_process_group(
+        backend=backend,
+        init_method=f'tcp://{master_addr}:{init_master_port}',
+        world_size=world_size,
+        rank=rank,
+        timeout=init_timeout
+    )
+    
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    print(f'✓ Process group initialized: world_size={world_size}, rank={rank}')
+    return world_size, rank, master_addr, training_master_port
+
+
 def discover_and_save_hostnames():
     """
     Discover all hostnames using PyTorch allgather and save to file
@@ -645,180 +762,61 @@ def discover_and_save_hostnames():
     """
     print(f'Starting cluster discovery...')
     print(f'Environment: RANK={os.environ.get("RANK", "N/A")}, WORLD_SIZE={os.environ.get("WORLD_SIZE", "N/A")}')
-    
-    # Save original NCCL environment variables
-    nccl_vars = ['NCCL_SOCKET_IFNAME', 'NCCL_IB_DISABLE', 'NCCL_DEBUG']
-    original_nccl_env = {}
-    for var in nccl_vars:
-        if var in os.environ:
-            original_nccl_env[var] = os.environ[var]
-    
+
     try:
-        print(f'Initializing PyTorch distributed...')
-        # Set NCCL environment variables for GB200
-        # These should be set before initializing process group
-        if 'NCCL_SOCKET_IFNAME' not in os.environ:
-            # Try to detect network interfaces dynamically
-            detected_ifname = detect_network_interfaces()
-            if detected_ifname:
-                os.environ['NCCL_SOCKET_IFNAME'] = detected_ifname
-            else:
-                os.environ['NCCL_SOCKET_IFNAME'] = 'enP22p3s0f0np0,enP6p3s0f0np0'
-        
-        if 'NCCL_IB_DISABLE' not in os.environ:
-            os.environ['NCCL_IB_DISABLE'] = '1'
-        os.environ['NCCL_DEBUG'] = os.environ.get('NCCL_DEBUG', 'WARN')
-        
-        # Get environment variables from pytorch-job
-        master_addr = os.environ.get('MASTER_ADDR', 'localhost')
-        # Use a different port for initialization to avoid conflict with training
-        # Use INIT_MASTER_PORT if set, otherwise use MASTER_PORT + 1
-        training_master_port = int(os.environ.get('MASTER_PORT', '23456'))
-        init_master_port = int(os.environ.get('INIT_MASTER_PORT', str(training_master_port + 1)))
-        world_size = int(os.environ.get('WORLD_SIZE', 1))
-        rank = int(os.environ.get('RANK', 0))
-        
-        print(f'Configuration: master_addr={master_addr}, init_port={init_master_port}, world_size={world_size}, rank={rank}')
-        
-        # Initialize process group
-        backend = 'nccl' if torch.cuda.is_available() else 'gloo'
-        print(f'Using backend: {backend} (CUDA available: {torch.cuda.is_available()})')
-        
-        # Increase timeout for GB200 network initialization
-        init_timeout = torch.distributed.default_pg_timeout
-        if init_timeout.total_seconds() < 1800:  # 30 minutes
-            from datetime import timedelta
-            init_timeout = timedelta(seconds=1800)
-        
-        print(f'Calling dist.init_process_group: backend={backend}, master={master_addr}:{init_master_port}, world_size={world_size}, rank={rank}, timeout={init_timeout.total_seconds()}s')
-        dist.init_process_group(
-            backend=backend,
-            init_method=f'tcp://{master_addr}:{init_master_port}',
-            world_size=world_size,
-            rank=rank,
-            timeout=init_timeout
-        )
-        # print(f'✓ Process group initialized successfully')
-        
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
-        # print(f'Confirmed: world_size={world_size}, rank={rank}')
+        world_size, rank, master_addr, training_master_port = init_distributed_process_group()
         
         # Get current hostname and IP address
-        current_hostname = os.environ.get('HOSTNAME', '')
-        if not current_hostname:
-            current_hostname = socket.gethostname()
-        # print(f'Current hostname: {current_hostname}')
+        current_hostname = get_actual_hostname()
+        current_ip = get_node_ip(current_hostname)
+        print(f'[rank{rank}] Node info: hostname="{current_hostname}", ip="{current_ip}"')
         
-        # Get current node's IP address (no DNS resolution)
-        # Method: Get IP from network interfaces by connecting to external address
-        current_ip = None
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                # Connect to a remote address (doesn't actually send data)
-                # This gets the local IP address used for the connection
-                s.connect(('8.8.8.8', 80))
-                current_ip = s.getsockname()[0]
-            except Exception as e:
-                print(f'Warning: Could not get IP via socket connection: {e}', file=sys.stderr)
-            finally:
-                s.close()
-        except Exception as e:
-            print(f'Warning: Could not create socket to get IP: {e}', file=sys.stderr)
-        
-        if not current_ip:
-            # Fallback: try to get IP from hostname (but this might use DNS)
-            # Only as last resort
-            try:
-                current_ip = socket.gethostbyname(current_hostname)
-                print(f'Got IP via hostname resolution: {current_ip}')
-            except (socket.gaierror, socket.herror) as e:
-                # If hostname is already an IP address, use it directly
-                import re
-                ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-                if re.match(ip_pattern, current_hostname):
-                    current_ip = current_hostname
-                    print(f'Hostname appears to be an IP address: {current_ip}')
-                else:
-                    print(f'Error: Could not determine IP address for {current_hostname}: {e}', file=sys.stderr)
-                    current_ip = current_hostname  # Use hostname as fallback
-        else:
-            print(f'Current IP address: {current_ip}')
-        
-        # Convert hostname and IP to bytes for allgather
+        # Gather hostnames and IPs from all nodes
+        use_cuda = torch.cuda.is_available()
+        max_len = 256
         hostname_bytes = current_hostname.encode('utf-8')
         ip_bytes = current_ip.encode('utf-8')
-        max_len = 256
-        hostname_bytes = hostname_bytes[:max_len].ljust(max_len, b'\0')
-        ip_bytes = ip_bytes[:max_len].ljust(max_len, b'\0')
         
-        # Create tensors for allgather (hostname and IP)
-        if torch.cuda.is_available():
-            local_hostname_tensor = torch.ByteTensor(list(hostname_bytes)).cuda()
-            local_ip_tensor = torch.ByteTensor(list(ip_bytes)).cuda()
-            gathered_hostname_tensors = [torch.zeros_like(local_hostname_tensor) for _ in range(world_size)]
-            gathered_ip_tensors = [torch.zeros_like(local_ip_tensor) for _ in range(world_size)]
-        else:
-            local_hostname_tensor = torch.ByteTensor(list(hostname_bytes))
-            local_ip_tensor = torch.ByteTensor(list(ip_bytes))
-            gathered_hostname_tensors = [torch.zeros_like(local_hostname_tensor) for _ in range(world_size)]
-            gathered_ip_tensors = [torch.zeros_like(local_ip_tensor) for _ in range(world_size)]
+        local_hostname_tensor, gathered_hostname_tensors = create_string_tensors(
+            hostname_bytes, max_len, world_size, use_cuda)
+        local_ip_tensor, gathered_ip_tensors = create_string_tensors(
+            ip_bytes, max_len, world_size, use_cuda)
         
-        print(f'Gathering hostnames and IP addresses from all nodes...')
+        print(f'[rank{rank}] Gathering hostnames and IPs from all nodes...')
         dist.all_gather(gathered_hostname_tensors, local_hostname_tensor)
         dist.all_gather(gathered_ip_tensors, local_ip_tensor)
-        print(f'✓ Hostname and IP gathering completed')
+        print(f'[rank{rank}] ✓ All_gather completed')
         
-        # Extract hostnames and IPs from gathered tensors
+        # Extract hostnames and IPs
+        hostnames_list = extract_strings_from_tensors(gathered_hostname_tensors, use_cuda)
+        ips_list = extract_strings_from_tensors(gathered_ip_tensors, use_cuda)
+        
         hostnames = []
         hostname_to_ip = {}
-        for i, (hostname_tensor, ip_tensor) in enumerate(zip(gathered_hostname_tensors, gathered_ip_tensors)):
-            hostname_bytes = bytes(hostname_tensor.cpu().tolist() if torch.cuda.is_available() else hostname_tensor.tolist()).rstrip(b'\0')
-            ip_bytes = bytes(ip_tensor.cpu().tolist() if torch.cuda.is_available() else ip_tensor.tolist()).rstrip(b'\0')
-            hostname = hostname_bytes.decode('utf-8', errors='ignore')
-            ip = ip_bytes.decode('utf-8', errors='ignore')
+        for i, (hostname, ip) in enumerate(zip(hostnames_list, ips_list)):
             if hostname:
                 hostnames.append(hostname)
                 if ip:
                     hostname_to_ip[hostname] = ip
                     print(f'  Rank {i}: {hostname} -> {ip}')
-                else:
-                    print(f'  Rank {i}: {hostname} -> (no IP)')
         
         print(f'Discovered {len(hostnames)} hostnames: {", ".join(hostnames)}')
         
+        # Sync all environment variables from rank0 to all ranks
+        print(f'[rank{rank}] Syncing all environment variables from rank0...')
+        sync_env_vars_from_rank0(rank, world_size, use_cuda)
+        print(f'[rank{rank}] ✓ Environment variable sync completed')
+        
         # Distribute SSH public key to all nodes
-        # Use project SSH key path (handles env vars and project directory)
         ssh_public_key = get_project_ssh_public_key_path()
-        ssh_key = os.environ.get('SSH_KEY', '')  # Get SSH_KEY env var for error messages
-        
         print(f'Distributing SSH public key from {ssh_public_key}...')
-        print(f'Public key file exists: {os.path.exists(ssh_public_key)}')
-        if os.path.exists(ssh_public_key):
-            with open(ssh_public_key, 'r') as f:
-                key_preview = f.read().strip()[:50]
-                print(f'Public key preview: {key_preview}...')
-        else:
-            print(f'Warning: SSH public key file not found at {ssh_public_key}')
-            if ssh_key:
-                print(f'SSH_KEY was set to: {ssh_key}')
-            if ssh_key and ssh_public_key != ssh_key + '.pub':
-                print(f'Trying alternative: {ssh_key}.pub')
-        
-        print(f'Calling distribute_ssh_key...')
         success = distribute_ssh_key(hostnames, ssh_public_key)
         if success:
             print(f'✓ SSH public key distribution completed on rank {rank}')
         else:
             print(f'✗ Warning: SSH public key distribution may have failed on rank {rank}', file=sys.stderr)
         
-        print(f'Waiting for barrier...')
-        dist.barrier()
-        print(f'✓ Barrier completed')
-        
         # Restart SSH service on all nodes after key distribution
-        # This ensures the SSH service picks up the new authorized_keys
         ssh_port = int(os.environ.get('SSH_PORT', '2025'))
         print(f'[rank{rank}] Restarting SSH service on all nodes (port {ssh_port})...')
         success = restart_ssh_service(ssh_port)
@@ -827,80 +825,62 @@ def discover_and_save_hostnames():
         else:
             print(f'[rank{rank}] ✗ Warning: SSH service restart may have failed', file=sys.stderr)
 
-        # Only rank 0 saves the result
+        # Only rank 0 saves the result and updates configs
         if rank == 0:
-            # Save hostnames (keep original hostnames, not IPs)
-            # DNS resolution will be done when connecting
-            cluster_info = {
-                'master_addr': master_addr,
-                'master_port': training_master_port,  # Save training port, not init port
-                'world_size': world_size,
-                'hostnames': hostnames  # Save hostnames (DNS resolution will be done when connecting)
-            }
-            
-            # Save to shared location (assume all nodes can access)
-            info_file = os.environ.get('CLUSTER_INFO_FILE', '/tmp/cluster_info.json')
-            with open(info_file, 'w') as f:
-                json.dump(cluster_info, f, indent=2)
-            
-            print(f'Cluster info saved to {info_file}')
-            print(f'Discovered {len(hostnames)} nodes: {", ".join(hostnames)}')
-            
-            update_hosts_file(hostnames, hostname_to_ip)
-            
-            # Update SSH config for easy login without specifying key
-            # Use project SSH key path (handles env vars and project directory)
-            ssh_key_path = get_project_ssh_key_path()
-            
-            # Fix SSH key permissions BEFORE updating SSH config
-            # This ensures direct SSH usage (ssh rank-1) works without permission errors
-            from dist_launch import _fix_ssh_key_permissions
-            if _fix_ssh_key_permissions(ssh_key_path):
-                print(f'✓ SSH key permissions are correct: {ssh_key_path}')
-            else:
-                print(f'⚠ Warning: Could not fix SSH key permissions for {ssh_key_path}', file=sys.stderr)
-                print(f'  Direct SSH usage (ssh rank-1) may fail. Run: dist-launch fix-ssh-key', file=sys.stderr)
-            
-            ssh_port = int(os.environ.get('SSH_PORT', '2025'))
-            ssh_user = os.environ.get('SSH_USER', 'root')
-            print(f'Updating SSH config with key: {ssh_key_path}, port: {ssh_port}, user: {ssh_user}')
-            update_ssh_config(hostnames, ssh_key_path, ssh_port, ssh_user, hostname_to_ip)
-            
-            dist.barrier()
+            _save_cluster_info_and_update_configs(hostnames, hostname_to_ip, master_addr, training_master_port, world_size)
             return hostnames
         
-        dist.barrier()
-        return None
-        
-    except Exception as e:
-        print(f'Error discovering hosts: {e}', file=sys.stderr)
-        import traceback
-        print(f'Traceback:', file=sys.stderr)
-        traceback.print_exc()
         return None
     finally:
-        # Restore original NCCL environment variables to avoid conflicts with train.sh
-        nccl_vars = ['NCCL_SOCKET_IFNAME', 'NCCL_IB_DISABLE', 'NCCL_DEBUG']
-        for var in nccl_vars:
-            if var in original_nccl_env:
-                os.environ[var] = original_nccl_env[var]
-            elif var in os.environ:
-                # Remove if it was added by us
-                if var not in original_nccl_env:
-                    del os.environ[var]
-        
         # Clean up process group if initialized
-        # This is critical to free the port for training phase
-        try:
-            if dist.is_initialized():
-                print(f'[rank{rank}] Destroying process group to free port for training...')
-                dist.destroy_process_group()
-                print(f'[rank{rank}] Process group destroyed, port freed')
-                # Give a small delay to ensure port is fully released
-                import time
-                time.sleep(0.5)
-        except Exception as e:
-            print(f'Warning: Failed to destroy process group: {e}', file=sys.stderr)
+        _cleanup_process_group()
+
+
+def _save_cluster_info_and_update_configs(hostnames, hostname_to_ip, master_addr, training_master_port, world_size):
+    """Save cluster info and update configs on rank0"""
+    cluster_info = {
+        'master_addr': master_addr,
+        'master_port': training_master_port,
+        'world_size': world_size,
+        'hostnames': hostnames
+    }
+    
+    info_file = os.environ.get('CLUSTER_INFO_FILE', '/tmp/cluster_info.json')
+    with open(info_file, 'w') as f:
+        json.dump(cluster_info, f, indent=2)
+    print(f'Cluster info saved to {info_file}')
+    print(f'Discovered {len(hostnames)} nodes: {", ".join(hostnames)}')
+    
+    update_hosts_file(hostnames, hostname_to_ip)
+    
+    ssh_key_path = get_project_ssh_key_path()
+    from dist_launch import _fix_ssh_key_permissions
+    if _fix_ssh_key_permissions(ssh_key_path):
+        print(f'✓ SSH key permissions are correct: {ssh_key_path}')
+    else:
+        print(f'⚠ Warning: Could not fix SSH key permissions for {ssh_key_path}', file=sys.stderr)
+        print(f'  Direct SSH usage (ssh rank-1) may fail. Run: dist-launch fix-ssh-key', file=sys.stderr)
+    
+    ssh_port = int(os.environ.get('SSH_PORT', '2025'))
+    ssh_user = os.environ.get('SSH_USER', 'root')
+    print(f'Updating SSH config with key: {ssh_key_path}, port: {ssh_port}, user: {ssh_user}')
+    update_ssh_config(hostnames, ssh_key_path, ssh_port, ssh_user, hostname_to_ip)
+
+
+def _cleanup_process_group():
+    """Clean up process group if initialized"""
+    if not dist.is_initialized():
+        return
+    
+    try:
+        current_rank = dist.get_rank()
+        print(f'[rank{current_rank}] Destroying process group to free port for training...')
+        dist.destroy_process_group()
+        print(f'[rank{current_rank}] Process group destroyed, port freed')
+        import time
+        time.sleep(0.5)
+    except Exception:
+        pass  # Ignore errors during cleanup
 
 
 def main():
